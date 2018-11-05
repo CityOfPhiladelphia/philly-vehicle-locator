@@ -16,6 +16,7 @@ Credit: This script was adapted from 'mapmatching' simonscheider (https://github
 import os
 import sys
 try:
+    from ast import literal_eval
     # from collections import OrderedDict
     from configparser import ConfigParser
     import datetime
@@ -40,7 +41,7 @@ def errorhandler(logstring='Script failed.'):
     console."""
     log.critical(logstring)
     log.critical(traceback.format_exc())
-    # print(logstring)
+    print(logstring)
     print(traceback.format_exc())
 
 
@@ -49,7 +50,7 @@ def point_retriever():
      previous config defined amount of time. Projects points into meter based projection in one of two ways depending on
      configuration. If default transformation method is acceptable, api_project should be set to True.  Otherwise, it
      must be set to False, with a transformation method provided."""
-    current_time_utc = int(datetime.datetime.timestamp(datetime.datetime.now()))
+    current_time_utc = 1541081729  # int(datetime.datetime.timestamp(datetime.datetime.now()))
     start_slice_utc = current_time_utc - int(config['inputs']['point_service_pull_time'])
     baseURL = config['inputs']['point_service_baseurl']
     where = config['inputs']['point_service_where'].format(start_slice_utc)
@@ -159,6 +160,7 @@ def read_point_grid(grid):
             for grid_point in grid_cursor:
                 point_grid_index[grid_point[0]] = grid_point [1]
             del grid_cursor
+            print('Point grid size: {0}'.format(len(point_grid_index)))
             return point_grid_index
         else:
             raise FileNotFoundError('Point grid file not found. Make sure it exists and the config file is correct.')
@@ -226,36 +228,97 @@ def index_track_points(track, grid):
     """
     # TODO test the logic in this function to make sure it's working correctly.
     track_points = {}
+    track_total = int(arcpy.GetCount_management(track))
+    track_count = 0
     point_index = 0
-    duplicate_count = 0
-    previous_candidates = None
+    candidates = None
+    previous_candidates = [None, None]
+    previous_previous_candidates = [None, None]
+    candidate_trigger = False
+    previous_gridkey = (None, [None])
+    previous_previous_gridkey = (None, [None])
+    gridkey_trigger = False
+
     track_point_cursor = arcpy.da.SearchCursor(in_table=track, field_names=['latitude', 'longitude', 'fixtimeutf'])
     for track_point in track_point_cursor:
-        point_search = build_search_string(track_point[0], track_point[1])
-        candidates = grid[point_search]
-        if len(candidates) == 1:
-            if not previous_candidates or candidates != previous_candidates:
-                duplicate_count = 1
-                previous_candidates = candidates
-                track_points[point_index] = [track_point[2], candidates]
-                point_index += 1
-            else:
-                duplicate_count += 1
-                if duplicate_count <= 2:
-                    track_points[point_index] = [track_point[2], candidates]
+        track_count += 1
+        if track_count != track_total:
+            point_search = build_search_string(track_point[0], track_point[1])
+            try:
+                candidates = literal_eval(grid[point_search])
+            except KeyError:
+                print('{0} does not exist in the grid'.format(point_search))
+            except:
+                errorhandler('New error, please debug.')
+            if len(candidates) == 1:
+                if gridkey_trigger:
+                    track_points[point_index] = previous_gridkey[1]
                     point_index += 1
+                    gridkey_trigger = False
+                previous_gridkey = (None, [None])
+                previous_previous_gridkey = (None, [None])
+                if candidates.keys() == previous_candidates[1].keys():
+                    if previous_candidates[1].keys() == previous_previous_candidates[1].keys():
+                        previous_previous_candidates = previous_candidates
+                        previous_candidates = [track_point[2], candidates]
+                        candidate_trigger = True
+                    else:
+                        previous_previous_candidates = previous_candidates
+                        previous_candidates = [track_point[2], candidates]
+                        candidate_trigger = True
                 else:
-                    # TODO test below line
-                    output_writer(table=production_table, vin=vin_number, match_route={next(iter(candidates.keys())): track_point[2]})
+                    if candidate_trigger:
+                        track_points[point_index] = previous_candidates
+                        point_index += 1
+                        previous_previous_candidates = [None, None]
+                        previous_candidates = [track_points[2], candidates]
+                        track_points[point_index] = [track_point[2], candidates]
+                        point_index += 1
+                        candidate_trigger = False
+                    else:
+                        previous_previous_candidates = [None, None]
+                        previous_candidates = [track_point[2], candidates]
+                        track_points[point_index] = [track_point[2], candidates]
+                        point_index += 1
+            else:
+                if candidate_trigger:
+                    track_points[point_index] = previous_candidates
+                    point_index += 1
+                    candidate_trigger = False
+                previous_candidates = [None, None]
+                previous_previous_candidates = [None, None]
+                if point_search == previous_gridkey[0]:
+                    if previous_gridkey[0] == previous_previous_gridkey[0]:
+                        previous_previous_gridkey = previous_gridkey
+                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        gridkey_trigger = True
+                    else:
+                        previous_previous_gridkey = previous_gridkey
+                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        gridkey_trigger = True
+                else:
+                    if gridkey_trigger:
+                        track_points[point_index] = previous_gridkey[1]
+                        point_index += 1
+                        previous_previous_gridkey = (None, [None])
+                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        track_points[point_index] = [track_point[2], candidates]
+                        point_index += 1
+                        gridkey_trigger = False
+                    else:
+                        previous_previous_gridkey = (None, [None])
+                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        track_points[point_index] = [track_point[2], candidates]
+                        point_index += 1
         else:
+            if candidate_trigger:
+                track_points[point_index] = previous_candidates
+                point_index += 1
+            if gridkey_trigger:
+                track_points[point_index] = previous_gridkey[1]
+                point_index += 1
             track_points[point_index] = [track_point[2], candidates]
-            point_index += 1
-            previous_candidates = None
-            duplicate_count = 0
-        del point_search
-        del candidates
-    del point_index
-    del track_point_cursor
+    # Todo delete variables
     return track_points
 
 
@@ -346,7 +409,6 @@ if __name__ == '__main__':
 
     # Read in the point grid to capture candidate street network segments for each possible gps point
     grid_index = read_point_grid(point_grid)
-
     arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
                           sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
     point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin'])
@@ -361,13 +423,13 @@ if __name__ == '__main__':
 
     for vin_number in list_vins:
         print('Processing {0}'.format(vin_number))
-        # arcpy.MakeFeatureLayer_management(in_features='in_memory/points_sorted', out_layer='mem_vin_points',
-        #                                   where_clause=""" "vin" LIKE {0} """.format(vin_number), workspace='in_memory')
-        #
-        # # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
-        # # layer for each vin
-        # street_seg_identifier(gps_points='in_memory/mem_vin_points', grid=grid_index, net_decay_constant=30,
-        #                       euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+        arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
+                                          where_clause=""" "vin" LIKE '{0}' """.format(vin_number), workspace='in_memory')
+
+        # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
+        # layer for each vin
+        street_seg_identifier(gps_points='mem_vin_points', grid=grid_index, net_decay_constant=30,
+                              euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
 
 
 
