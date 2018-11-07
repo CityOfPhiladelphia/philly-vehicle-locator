@@ -4,7 +4,7 @@ File Name: street-segment-identifier.py
 Version: 1.0
 Date Created: 10/24/2018
 Author: Tim Haynes & Paul Sesink Clee
-Last Update: 10/26/2018
+Last Update: 11/6/2018
 Updater: Tim Haynes
 
 Summary: Script for consuming NetworkFleet GPS points and adapting them for street segment outputs.
@@ -24,7 +24,7 @@ try:
     # from itertools import repeat
     import arcpy
     import logging
-    # import math
+    from math import exp, sqrt
     import networkx as nx
     # import numpy
     import traceback
@@ -36,12 +36,12 @@ except ImportError:
 # endregion
 
 
-def errorhandler(logstring='Script failed.'):
+def error_handler(log_string='Script failed.'):
     """Log errors as critical, including user input log string and traceback information. Print same information in
     console."""
-    log.critical(logstring)
+    log.critical(log_string)
     log.critical(traceback.format_exc())
-    print(logstring)
+    print(log_string)
     print(traceback.format_exc())
 
 
@@ -106,7 +106,7 @@ def index_network_segment_info(input_network):
             raise FileNotFoundError('Street Network file not found. Make sure it exists and the config file is '
                                     'correct.')
     except FileNotFoundError as e:
-        errorhandler(str(e))
+        error_handler(str(e))
 
 
 def create_network_graph(input_network, segment_lengths):
@@ -137,7 +137,7 @@ def create_network_graph(input_network, segment_lengths):
             raise FileNotFoundError('Street Network file not found. Make sure it exists and the config file is '
                                     'correct.')
     except FileNotFoundError as e:
-        errorhandler(str(e))
+        error_handler(str(e))
 
 
 def read_point_grid(grid):
@@ -165,7 +165,7 @@ def read_point_grid(grid):
         else:
             raise FileNotFoundError('Point grid file not found. Make sure it exists and the config file is correct.')
     except FileNotFoundError as e:
-        errorhandler(str(e))
+        error_handler(str(e))
 
 
 def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_decay_constant=10,
@@ -194,24 +194,66 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
     gps_track = index_track_points(gps_points, grid)
 
     # TODO Write duplicated segments, yards, etc directly into output table, remove from gps track
-
+    # If the GPS track has more than one point:
     if len(gps_track) > 1:
         # Initialize the first point
-        for segment_candidate in gps_track[0][1]:
+        print(gps_track[0])
+        segment_candidates = gps_track[0][1]
+        for segment_candidate in segment_candidates:
             path_array[0][segment_candidate] = {'probability': gps_track[0][1][segment_candidate],
                                                 'previous_segment': None, 'path': [], 'path_nodes': [],
                                                 'time': gps_track[0][0]}
+        print(path_array)
         # Run the Viterbi algorithm
-        # for
-        # TODO Continue writing function
+        for gps_point in range(1, len(gps_track)):
+            gps_point_time = gps_track[gps_point][0]
+            path_array.append({})
+            # Store the segment candidates for the previous GPS point
+            previous_segment_candidates = segment_candidates
+            # Get the segment candidates for the current point along with their a-priori probabilities based on
+            # Euclidean distance (these are calculated before time and stored in the point grid file for lookup
+            for segment_candidate in gps_track[gps_point][1]:
+                maximum_transition_probability = 0
+                previous_street_segment = None
+                path = []
+                path_nodes = None
+                # Determine the highest network transition probability from the previous point's candidates to the
+                # current point's candidates and find the corresponding network path
+                for previous_segment_candidate in previous_segment_candidates:
+                    path_nodes = path_array[gps_point - 1][previous_segment_candidate]['path_nodes'][-10]
+                    network_transition_probability = calculate_network_transition_probability(
+                        segment_1=previous_segment_candidate,
+                        segment_2=segment_candidate, input_graph=network_graph, end_nodes=endpoints,
+                        net_decay_constant=net_decay)
+                    network_probability = network_transition_probability[0]
+                    path_array_probability = path_array[gps_point - 1][previous_segment_candidate]['probability']
+                    transition_probability = path_array_probability * network_probability
+
+                    if transition_probability > maximum_transition_probability:
+                        maximum_transition_probability = transition_probability
+                        previous_street_segment = previous_segment_candidate
+                        path = network_transition_probability[1]
+                        if network_transition_probability[2] is not None:
+                            path_nodes.append(network_transition_probability[2])
+
+                    maximum_probability = gps_track[gps_point][1][segment_candidate] * maximum_transition_probability
+                    path_array[gps_point][segment_candidate] = {'probability': maximum_probability,
+                                                                'previous_segment': previous_street_segment,
+                                                                'path': path, 'path_nodes': path_nodes,
+                                                                'time':gps_point_time}
+
+                maximum_value = max(value['probability'] for value in path_array[gps_point].values())
+                maximum_value = (1 if maximum_value == 0 else maximum_value)
+                for s in path_array[gps_point].keys():
+                    path_array[gps_point][s]['probability'] = path_array[gps_point][s]['probability'] / maximum_value
+        # TODO Pickup at line 97, first opt = []
+    # Else if the GPS track has exactly one point, choose the segment candidate that has the highest probability and
+    # write it directly to the output table
     elif len(gps_track) == 1:
         print('Found a gps_track with length == 1.')
         max_probable_segment = max(gps_track[0][1], key=lambda key: gps_track[0][1][key])
         print('Max probable segment is {0}'.format(max_probable_segment))
         output_writer(table=production_table, vin=vin_number, match_route={max_probable_segment: gps_track[0][0]})
-    else:
-        pass
-        # TODO Do we need to do anything in this scenario
 
 
 def index_track_points(track, grid):
@@ -226,14 +268,13 @@ def index_track_points(track, grid):
         network segment candidates for each point. Key=point order, Value=list including point time (integer) and
         candidate segments with probabilities (dictionary).
     """
-    # TODO test the logic in this function to make sure it's working correctly.
     track_points = {}
-    track_total = int(arcpy.GetCount_management(track))
+    track_total = arcpy.GetCount_management(track)
     track_count = 0
     point_index = 0
     candidates = None
-    previous_candidates = [None, None]
-    previous_previous_candidates = [None, None]
+    previous_candidates = [None, {}]
+    previous_previous_candidates = [None, {}]
     candidate_trigger = False
     previous_gridkey = (None, [None])
     previous_previous_gridkey = (None, [None])
@@ -249,7 +290,7 @@ def index_track_points(track, grid):
             except KeyError:
                 print('{0} does not exist in the grid'.format(point_search))
             except:
-                errorhandler('New error, please debug.')
+                error_handler('New error, please debug.')
             if len(candidates) == 1:
                 if gridkey_trigger:
                     track_points[point_index] = previous_gridkey[1]
@@ -270,13 +311,13 @@ def index_track_points(track, grid):
                     if candidate_trigger:
                         track_points[point_index] = previous_candidates
                         point_index += 1
-                        previous_previous_candidates = [None, None]
-                        previous_candidates = [track_points[2], candidates]
+                        previous_previous_candidates = [None, {}]
+                        previous_candidates = [track_point[2], candidates]
                         track_points[point_index] = [track_point[2], candidates]
                         point_index += 1
                         candidate_trigger = False
                     else:
-                        previous_previous_candidates = [None, None]
+                        previous_previous_candidates = [None, {}]
                         previous_candidates = [track_point[2], candidates]
                         track_points[point_index] = [track_point[2], candidates]
                         point_index += 1
@@ -285,8 +326,8 @@ def index_track_points(track, grid):
                     track_points[point_index] = previous_candidates
                     point_index += 1
                     candidate_trigger = False
-                previous_candidates = [None, None]
-                previous_previous_candidates = [None, None]
+                previous_candidates = [None, {}]
+                previous_previous_candidates = [None, {}]
                 if point_search == previous_gridkey[0]:
                     if previous_gridkey[0] == previous_previous_gridkey[0]:
                         previous_previous_gridkey = previous_gridkey
@@ -325,7 +366,7 @@ def index_track_points(track, grid):
 def build_search_string(latitude, longitude):
     """
     Converts latitude and longitude into the same format as the grid key in the grid point index (10 character string).
-        A point with latidude = 40.12345 and longitude = -75.12345 will be converted to '0123451234'. This methodology
+        A point with latitude = 40.12345 and longitude = -75.12345 will be converted to '0123451234'. This methodology
         only works in an area with an extent covering less than 10 decimal degrees latitude and less than 10 decimal
         degrees longitude. Note that the point index grid rounds to the 4th decimal place, the gridkey built here takes
         this into account.
@@ -343,6 +384,94 @@ def build_search_string(latitude, longitude):
     while len(last_five) < 5:
         last_five = last_five + '0'
     return first_five + last_five
+
+
+def calculate_network_transition_probability(segment_1, segment_2, input_graph, end_nodes, net_decay_constant):
+    """
+        TODO Write summary
+
+        Parameters: TODO define parameters
+             segment_1:
+             segment_2:
+             input_graph:
+             end_nodes:
+             net_decay_constant:
+
+        Output: TODO Write output summary
+        """
+    sub_path = []
+    segment_2_point = None
+
+    if segment_1 == segment_2:
+        # if previous segment candidate is the same as the current segment candidate, distance is 0
+        distance = 0
+    else:
+        # Obtain edges (tuples of endpoints) for segment identifiers
+        segment_1_edge = end_nodes[segment_1]
+        segment_2_edge = end_nodes[segment_2]
+
+        # Determine segment endpoints of the two segments that are closest to each other
+        minimum_pair = [0, 0, 100000]
+        for i in range(0, 2):
+            for j in range(0, 2):
+                d = round(calculate_point_distance(segment_1_edge=segment_1_edge[i], segment_2_edge=segment_2_edge[j]), 2)
+                if d < minimum_pair[2]:
+                    minimum_pair = [i, j, d]
+        segment_1_point = segment_1_edge[minimum_pair[0]]
+        segment_2_point = segment_2_edge[minimum_pair[1]]
+
+        if segment_1_point == segment_2_point:
+            distance = 5
+        else:
+            try:
+                if input_graph.has_node(segment_1_point) and input_graph.has_node(segment_2_point):
+                    distance = nx.shortest_path_length(input_graph, segment_1_point, segment_2_point, weight='length')
+                    path = nx.shortest_path(input_graph, segment_1_point, segment_2_point, weight='length')
+                    path_edges = zip(path, path[1:])
+                    sub_path = []
+                    for path_edge in path_edges:
+                        segment_id = input_graph[path_edge[0]][path_edge[1]]['OBJECTID']  # TODO change to segment id
+                        sub_path.append(segment_id)
+                else:
+                    # Node not found in segment's input graph, set distance to a larger number
+                    distance = 3 * net_decay_constant
+            except nx.NetworkXNoPath:
+                # If NetworkX returns a no path error, set  distance to a larger number
+                distance = 3 * net_decay_constant
+    return calculate_network_distance_probability(distance=distance, net_decay_constant=net_decay_constant), sub_path, segment_2_point
+
+
+
+def calculate_point_distance(segment_1_edge, segment_2_edge):
+    """
+    Calculate the Euclidean distance between the endpoints of two segments
+
+    Parameters: TODO define parameters
+    segment_1_edge:
+    segment_2_edge:
+
+    Output: TODO write output summary
+    """
+    point_distance = sqrt((segment_1_edge[0] - segment_2_edge[0]) ** 2 + (segment_1_edge[1] - segment_2_edge[1]) ** 2)
+    return point_distance
+
+
+def calculate_network_distance_probability(distance, net_decay_constant):
+    """
+    TODO Write summary
+
+    Parameters: TODO define parameters
+         distance:
+         net_decay_constant:
+
+    Output: TODO Write output summary
+    """
+    distance = float(distance)
+    try:
+        network_distance_probability = 1 if distance == 0 else round(1 / exp(distance / net_decay_constant), 2)
+    except:
+        network_distance_probability = round(1 / float('inf'), 2)
+    return network_distance_probability
 
 
 def output_writer(table, vin, match_route):
@@ -381,14 +510,14 @@ if __name__ == '__main__':
         log_file_path = os.path.join(scriptDirectory, config['logging']['log_file'])
         log = logging.getLogger('street-segment-identifier')
         log.setLevel(logging.INFO)
-        hdlr = logging.FileHandler(log_file_path)
-        hdlr.setLevel(logging.INFO)
-        hdlrFormatter = logging.Formatter('%(name)s (%(levelname)s)-%(asctime)s: %(message)s', '%m/%d/%Y  %I:%M:%S %p')
-        hdlr.setFormatter(hdlrFormatter)
-        log.addHandler(hdlr)
+        handler = logging.FileHandler(log_file_path)
+        handler.setLevel(logging.INFO)
+        handlerFormatter = logging.Formatter('%(name)s (%(levelname)s)-%(asctime)s: %(message)s', '%m/%d/%Y  %I:%M:%S %p')
+        handler.setFormatter(handlerFormatter)
+        log.addHandler(handler)
         log.info('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
     except KeyError:
-        errorhandler('Make sure config file exists and contains a log_file variable under "street-segment-identifier".')
+        error_handler('Make sure config file exists and contains a log_file variable under "street-segment-identifier".')
 
     scriptStart = datetime.datetime.timestamp(datetime.datetime.now())
     print('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
@@ -420,16 +549,15 @@ if __name__ == '__main__':
         else:
             continue
         current_vin = point[0]
-
     for vin_number in list_vins:
         print('Processing {0}'.format(vin_number))
         arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
-                                          where_clause=""" "vin" LIKE '{0}' """.format(vin_number), workspace='in_memory')
+                                          where_clause=""" "vin" LIKE '{0}' """.format(vin_number),
+                                          workspace='in_memory')
 
         # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
         # layer for each vin
         street_seg_identifier(gps_points='mem_vin_points', grid=grid_index, net_decay_constant=30,
                               euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
-
 
 
