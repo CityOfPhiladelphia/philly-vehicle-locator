@@ -26,7 +26,7 @@ try:
     import logging
     from math import exp, sqrt
     import networkx as nx
-    # import numpy
+    import numpy
     import traceback
     # import time
 except ImportError:
@@ -197,19 +197,22 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
     # If the GPS track has more than one point:
     if len(gps_track) > 1:
         # Initialize the first point
-        print(gps_track[0])
         segment_candidates = gps_track[0][1]
         for segment_candidate in segment_candidates:
             path_array[0][segment_candidate] = {'probability': gps_track[0][1][segment_candidate],
                                                 'previous_segment': None, 'path': [], 'path_nodes': [],
                                                 'time': gps_track[0][0]}
-        print(path_array)
         # Run the Viterbi algorithm
+        previous_segment_candidates = None
         for gps_point in range(1, len(gps_track)):
             gps_point_time = gps_track[gps_point][0]
             path_array.append({})
             # Store the segment candidates for the previous GPS point
-            previous_segment_candidates = segment_candidates
+            if not previous_segment_candidates:
+                previous_segment_candidates = gps_track[0][1]
+            else:
+                previous_segment_candidates = gps_track[gps_point - 1][1]
+
             # Get the segment candidates for the current point along with their a-priori probabilities based on
             # Euclidean distance (these are calculated before time and stored in the point grid file for lookup
             for segment_candidate in gps_track[gps_point][1]:
@@ -220,7 +223,7 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
                 # Determine the highest network transition probability from the previous point's candidates to the
                 # current point's candidates and find the corresponding network path
                 for previous_segment_candidate in previous_segment_candidates:
-                    path_nodes = path_array[gps_point - 1][previous_segment_candidate]['path_nodes'][-10]
+                    path_nodes = path_array[gps_point - 1][previous_segment_candidate]['path_nodes'][-10:]
                     network_transition_probability = calculate_network_transition_probability(
                         segment_1=previous_segment_candidate,
                         segment_2=segment_candidate, input_graph=network_graph, end_nodes=endpoints,
@@ -236,17 +239,58 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
                         if network_transition_probability[2] is not None:
                             path_nodes.append(network_transition_probability[2])
 
-                    maximum_probability = gps_track[gps_point][1][segment_candidate] * maximum_transition_probability
-                    path_array[gps_point][segment_candidate] = {'probability': maximum_probability,
-                                                                'previous_segment': previous_street_segment,
-                                                                'path': path, 'path_nodes': path_nodes,
-                                                                'time':gps_point_time}
+                maximum_probability = gps_track[gps_point][1][segment_candidate] * maximum_transition_probability
+                path_array[gps_point][segment_candidate] = {'probability': maximum_probability,
+                                                            'previous_segment': previous_street_segment,
+                                                            'path': path, 'path_nodes': path_nodes,
+                                                            'time': gps_point_time}
+            maximum_value = max(value['probability'] for value in path_array[gps_point].values())
+            maximum_value = (1 if maximum_value == 0 else maximum_value)
+            for s in path_array[gps_point].keys():
+                path_array[gps_point][s]['probability'] = path_array[gps_point][s]['probability'] / maximum_value
+        solved_path = {}
+        solved_path_index = 0
+        maximum_end_track_probability = max(value['probability'] for value in path_array[-1].values())
+        previous_state = None
+        if maximum_end_track_probability == 0:
+            raise ValueError('Point density error.')
+        # Get the most probable ending state (street network segment) of the path and its previous state
+        for state, data in path_array[-1].items():
+            if data['probability'] == maximum_end_track_probability:
+                state_point_time = data['time']
+                solved_path[solved_path_index] = [state, state_point_time]
+                solved_path_index += 1
+                previous_state = state
+                break
+        # trigger = False
+        # Follow the path until the first observed state to find the most probable states along the path and
+        # corresponding sub-paths
+        for path_index in range(len(path_array) - 2, -1, -1):
+            try:
+                probable_sub_path = path_array[path_index + 1][previous_state]['path']
+                sub_path_time = path_array[path_index + 1][previous_state]['time']
+                previous_state_segment = path_array[path_index + 1][previous_state]['previous_segment']
+                if len(probable_sub_path) > 0:
+                    for segment in probable_sub_path[::-1]:
+                        sub_path_time -= 1  # TODO make sure this is working in the correct direction, may want to interpolate instead of subtracting one second from next/previous point
+                        solved_path[solved_path_index] = [segment, sub_path_time]
+                        solved_path_index += 1
+                solved_path[solved_path_index] = [previous_state_segment, sub_path_time]
+                solved_path_index += 1
+                previous_state = previous_state_segment
+            except KeyError:
+                print('Key Error while finding path.')
+                continue
 
-                maximum_value = max(value['probability'] for value in path_array[gps_point].values())
-                maximum_value = (1 if maximum_value == 0 else maximum_value)
-                for s in path_array[gps_point].keys():
-                    path_array[gps_point][s]['probability'] = path_array[gps_point][s]['probability'] / maximum_value
-        # TODO Pickup at line 97, first opt = []
+        if len(solved_path) > 1:
+            optimized_solved_path = optimize_solved_path(input=solved_path)
+        elif len(solved_path) == 1:
+            print('How did this happen?')
+            pass
+        else:
+            print('See if this ever happens') # Todo see if this ever happens
+        return optimized_solved_path
+
     # Else if the GPS track has exactly one point, choose the segment candidate that has the highest probability and
     # write it directly to the output table
     elif len(gps_track) == 1:
@@ -254,6 +298,13 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
         max_probable_segment = max(gps_track[0][1], key=lambda key: gps_track[0][1][key])
         print('Max probable segment is {0}'.format(max_probable_segment))
         output_writer(table=production_table, vin=vin_number, match_route={max_probable_segment: gps_track[0][0]})
+    # except ValueError as e:
+    #     if str(e) == 'Point density error.':
+    #         print('Gotcha.')
+    #         return e
+    #     else:
+    #         print(e)
+    #         sys.exit(1)
 
 
 def index_track_points(track, grid):
@@ -268,10 +319,15 @@ def index_track_points(track, grid):
         network segment candidates for each point. Key=point order, Value=list including point time (integer) and
         candidate segments with probabilities (dictionary).
     """
+    # Create dictionary to store indexed points to run through Viterbi algorithm
     track_points = {}
+    # Get count of total amount of points in the track to check for indexing
     track_total = arcpy.GetCount_management(track)
+    # Initialize point and index counts
     track_count = 0
     point_index = 0
+    # Initialize variables to store information about points and previous points, used for determining if a point should
+    # be indexed
     candidates = None
     previous_candidates = [None, {}]
     previous_previous_candidates = [None, {}]
@@ -281,44 +337,74 @@ def index_track_points(track, grid):
     gridkey_trigger = False
 
     track_point_cursor = arcpy.da.SearchCursor(in_table=track, field_names=['latitude', 'longitude', 'fixtimeutf'])
+    # For each point in a vehicle's track
     for track_point in track_point_cursor:
         track_count += 1
+        # Build the search string for looking up a point's street segment candidates in the index grid
+        point_search = build_search_string(track_point[0], track_point[1])
+        # Determine if the point exists in the index grid and retrieve street segment candidates
+        try:
+            candidates = literal_eval(grid[point_search])
+        # If the point does not exist in the grid, ignore and move on to the next point
+        except KeyError:
+            print('{0} does not exist in the gridkey index'.format(point_search))
+            continue
+        except:
+            error_handler('New error, please debug.')
+        # If the point is not the final point in the track
         if track_count != track_total:
-            point_search = build_search_string(track_point[0], track_point[1])
-            try:
-                candidates = literal_eval(grid[point_search])
-            except KeyError:
-                print('{0} does not exist in the grid'.format(point_search))
-            except:
-                error_handler('New error, please debug.')
+            # If the point has no street segment candidates, ignore and move on to the next point
+            if len(candidates) == 0:
+                continue
+            # If the point has only one street segment candidate
             if len(candidates) == 1:
+                # Check to see if a previous segment with multiple candidates has been stored in memory
                 if gridkey_trigger:
+                    # If so, index the previous segment and reset the memory trigger
                     track_points[point_index] = previous_gridkey[1]
                     point_index += 1
                     gridkey_trigger = False
+                # Make sure the previous gridkey variables are empty
                 previous_gridkey = (None, [None])
                 previous_previous_gridkey = (None, [None])
+                # Check to see if the current point's single candidate is the same as the previous's
                 if candidates.keys() == previous_candidates[1].keys():
+                    # If so, this is the third or more consecutive point with a single, and matching, street segment
+                    # candidate
                     if previous_candidates[1].keys() == previous_previous_candidates[1].keys():
+                        # Prepare variables for next point
                         previous_previous_candidates = previous_candidates
                         previous_candidates = [track_point[2], candidates]
+                        # Set candidate trigger to true, signifying a single candidate point has been stored in memory
                         candidate_trigger = True
+                    # Else this is the second consecutive point with a single, and matching, street segment candidate
                     else:
+                        # Prepare variables for next point
                         previous_previous_candidates = previous_candidates
                         previous_candidates = [track_point[2], candidates]
+                        # Set candidate trigger to true, signifying a single candidate point has been stored in memory
                         candidate_trigger = True
+                # Else if the current point's single candidate is not the same as the previous's
                 else:
+                    # Check to see if a previous single point candidate has been stored in memory
                     if candidate_trigger:
+                        # If so, index the stored point
                         track_points[point_index] = previous_candidates
                         point_index += 1
+                        # Prepare variables for next point
                         previous_previous_candidates = [None, {}]
                         previous_candidates = [track_point[2], candidates]
+                        # Index the current point
                         track_points[point_index] = [track_point[2], candidates]
                         point_index += 1
+                        # Reset the memory trigger
                         candidate_trigger = False
+                    # If there is no point stored in memory
                     else:
+                        # Prepare variables for next point
                         previous_previous_candidates = [None, {}]
                         previous_candidates = [track_point[2], candidates]
+                        # Index the current point
                         track_points[point_index] = [track_point[2], candidates]
                         point_index += 1
             else:
@@ -351,14 +437,18 @@ def index_track_points(track, grid):
                         previous_gridkey = (point_search, [track_point[2], candidates])
                         track_points[point_index] = [track_point[2], candidates]
                         point_index += 1
+        # If the point is the final point in the track
         else:
+            # TODO We've ignored if the point before the final point should be skipped.  Check this logic
             if candidate_trigger:
+
                 track_points[point_index] = previous_candidates
                 point_index += 1
             if gridkey_trigger:
                 track_points[point_index] = previous_gridkey[1]
                 point_index += 1
-            track_points[point_index] = [track_point[2], candidates]
+            if len(candidates) > 0:
+                track_points[point_index] = [track_point[2], candidates]
     # Todo delete variables
     return track_points
 
@@ -377,12 +467,21 @@ def build_search_string(latitude, longitude):
 
     Output: Ten character string representing the grid key for the given point location.
     """
-    first_five = str(latitude)[1] + str(latitude)[3:-1]
+
+    if len(str(latitude)) == 8:
+        first_five = str(latitude)[1] + str(latitude)[3:-1]
+    else:
+        first_five = str(latitude)[1] + str(latitude)[3:]
     while len(first_five) < 5:
         first_five = first_five + '0'
-    last_five = str(longitude)[2] + str(longitude)[4:-1]
+
+    if len(str(longitude)) == 9:
+        last_five = str(longitude)[2] + str(longitude)[4:-1]
+    else:
+        last_five = str(longitude)[2] + str(longitude)[4:]
     while len(last_five) < 5:
         last_five = last_five + '0'
+
     return first_five + last_five
 
 
@@ -474,6 +573,67 @@ def calculate_network_distance_probability(distance, net_decay_constant):
     return network_distance_probability
 
 
+def optimize_solved_path(input):
+    """
+    TODO Write summary
+
+    Parameters: TODO define parameters
+        input:
+
+    Output: TODO Write output summary
+    """
+    for index in range(len(input), -1, -1):
+        pass
+        # TODO Adapt code from scratch 4 to fit in this function
+
+
+def densifier(sparse_points, threshold_meters=120):
+    # TODO Fix to set up for gridkey creation
+    """
+    TODO Write function summary.
+
+    Parameters: TODO define parameters
+    input:
+
+    Output: TODO write output summary.
+    """
+    sparse_points = arcpy.CopyFeatures_management(sparse_points, 'in_memory/sparse_points')
+    sparse_cursor = arcpy.da.SearchCursor(in_table=sparse_points, field_names=['SHAPE@XY', 'fixtimeutf'])
+    dense_cursor = arcpy.da.InsertCursor(in_table=sparse_points, field_names=['SHAPE@XY', 'fixtimeutf'])
+    previous_sparse_point = None
+    threshold_meters = float(threshold_meters)
+    point_list = []
+    for sparse_point in sparse_cursor:
+        point_list.append((sparse_point[0][0], sparse_point[0][1], sparse_point[1]))
+    del sparse_cursor
+    for listed_point in point_list:
+        current_sparse_point = (listed_point[0], listed_point[1], listed_point[2])
+        if previous_sparse_point:
+            # Calculate the distance between the current point and the previous
+            distance = sqrt((current_sparse_point[0] - previous_sparse_point[0]) ** 2 + (current_sparse_point[1] - previous_sparse_point[1]) ** 2)
+            # If distance is < threshold meters, there is no need to add additional points
+            if distance < threshold_meters:
+                previous_sparse_point = current_sparse_point
+                continue
+            # Else calculate the number of necessary midpoints
+            d = numpy.array([distance])
+            bins = numpy.array([threshold_meters, threshold_meters * 2, threshold_meters * 3, threshold_meters * 4,
+                                threshold_meters * 5])
+            midpoint_count = int(numpy.digitize(d, bins).item())
+            if midpoint_count == 5:
+                print('Long segment warning.')
+            # Calculate the distances new points will be from previous points on x and y axis
+            x_delta = (current_sparse_point[0] - previous_sparse_point[0]) / float(midpoint_count + 1)
+            y_delta = (current_sparse_point[1] - previous_sparse_point[1]) / float(midpoint_count + 1)
+            time_delta = (current_sparse_point[2] - previous_sparse_point[2]) / float(midpoint_count + 1 )
+            # Create new points and adjust the time of each point to maintain order
+            for count in range(1, midpoint_count + 1):
+                midpoint = (previous_sparse_point[0] + count * x_delta, previous_sparse_point[1] + count * y_delta)
+                dense_cursor.insertRow(((midpoint[0], midpoint[1]), previous_sparse_point[2] + count * time_delta))
+        previous_sparse_point = current_sparse_point
+    del dense_cursor
+    return arcpy.Sort_management(in_dataset=sparse_points, out_dataset='in_memory/dense_points', sort_field=[['fixtimeutf', 'ASCENDING']])
+
 def output_writer(table, vin, match_route):
     """
     Writes street network segment visits to the output table.
@@ -540,6 +700,8 @@ if __name__ == '__main__':
     grid_index = read_point_grid(point_grid)
     arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
                           sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
+    # arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted', out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent', out_name='testtesttest')
+    # arcpy.Copy_management(in_data='in_memory/mem_points_sorted', out_data='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent\\MapMatching.gdb\\testtesttest')
     point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin'])
     current_vin = None
     list_vins = []
@@ -550,14 +712,44 @@ if __name__ == '__main__':
             continue
         current_vin = point[0]
     for vin_number in list_vins:
-        print('Processing {0}'.format(vin_number))
-        arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
-                                          where_clause=""" "vin" LIKE '{0}' """.format(vin_number),
-                                          workspace='in_memory')
+        try:
+            print('Processing {0}'.format(vin_number))
+            arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
+                                              where_clause=""" "vin" LIKE '{0}' """.format(vin_number),
+                                              workspace='in_memory')
 
-        # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
-        # layer for each vin
-        street_seg_identifier(gps_points='mem_vin_points', grid=grid_index, net_decay_constant=30,
-                              euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+            # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
+            # layer for each vin
+            street_seg_identifier(gps_points='mem_vin_points', grid=grid_index, net_decay_constant=30,
+                                  euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+        except ValueError as e:
+            # todo try statement to prevent extra densification loops
+            if str(e) == 'Point density error.':
+                if config['options']['densify']:
+                    try:
+                        print('Attempting to densify points and repeat the identifier function.')
+                        dense_points = densifier('mem_vin_points', threshold_meters=config['options']['densify_threshold'])
+                        # arcpy.FeatureClassToFeatureClass_conversion(in_features=dense_points,
+                        #                                             out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent',
+                        #                                             out_name='testdense12')
+                        # break
+                        street_seg_identifier(gps_points=dense_points, grid=grid_index, net_decay_constant=30,
+                                              euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+                    except ValueError as e:
+                        if str(e) == 'Point density error.':
+                            print('Path could not be solved for {0}.'.format(vin_number))
+                            continue
+                        else:
+                            error_handler('New error, please debug.')
+                else:
+                    print('Vehicle path could not be solved, increase decay or select densify option in config.')
+        except:
+            error_handler('New error, please debug.')
+    print('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
 
-
+# TODO Error handle the bottleneck on point retrieval, including potential dam breaks
+#   - Dynamic window, time to last time recorded instead of constant window
+#   - If max record count, break into pieces
+# TODO Maintain some kind of point id through the seg visit table so records can be compared to the raw?
+# TODO Look at flags
+# TODO See if VIN and Assignment come through added densify points
