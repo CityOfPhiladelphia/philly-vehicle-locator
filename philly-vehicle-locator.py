@@ -50,7 +50,7 @@ def point_retriever():
      previous config defined amount of time. Projects points into meter based projection in one of two ways depending on
      configuration. If default transformation method is acceptable, api_project should be set to True.  Otherwise, it
      must be set to False, with a transformation method provided."""
-    current_time_utc = 1541081729  # int(datetime.datetime.timestamp(datetime.datetime.now()))
+    current_time_utc = int(datetime.datetime.timestamp(datetime.datetime.now()))
     start_slice_utc = current_time_utc - int(config['inputs']['point_service_pull_time'])
     baseURL = config['inputs']['point_service_baseurl']
     where = config['inputs']['point_service_where'].format(start_slice_utc)
@@ -111,13 +111,14 @@ def index_network_segment_info(input_network):
 
 def create_network_graph(input_network, segment_lengths):
     """
-    TODO Write function summary
+    Uses the networkx library to build a network graph from the streets network segment input, including the length of
+    the segment.
 
     Parameters:
         input_network (shapefile projected in meters): Street network gps points should be matched to.
         segment_lengths (dict): Output from index_network_segment_info function. Key=seg_id, Value=length of segment
 
-    Output: TODO Write function output
+    Output: subgraph: networkx graph of the street network segments
     """
     try:
         network_file_path = str(os.path.join(arcpy.env.workspace, input_network))
@@ -168,8 +169,7 @@ def read_point_grid(grid):
         error_handler(str(e))
 
 
-def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_decay_constant=10,
-                          max_distance_constant=50):
+def street_seg_identifier(gps_points, grid, net_decay_constant=30):
     """
     TODO Write function summary
 
@@ -184,16 +184,13 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
     """
     # Make sure constants are floats
     net_decay = float(net_decay_constant)
-    euclidean_decay = float(euclidean_decay_constant)
-    max_distance = float(max_distance_constant)
 
     # Initialize the path array to store
     path_array = [{}]
 
     # Read in points along with time and street network segment candidates for each
     gps_track = index_track_points(gps_points, grid)
-
-    # TODO Write duplicated segments, yards, etc directly into output table, remove from gps track
+    # TODO Write yards, etc directly into output table
     # If the GPS track has more than one point:
     if len(gps_track) > 1:
         # Initialize the first point
@@ -268,11 +265,11 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
         for path_index in range(len(path_array) - 2, -1, -1):
             try:
                 probable_sub_path = path_array[path_index + 1][previous_state]['path']
-                sub_path_time = path_array[path_index + 1][previous_state]['time']
+                sub_path_time = path_array[path_index + 1][previous_state]['time'] # TODO time is currently writing out one point off for all but first points.
                 previous_state_segment = path_array[path_index + 1][previous_state]['previous_segment']
                 if len(probable_sub_path) > 0:
                     for segment in probable_sub_path[::-1]:
-                        sub_path_time -= 1  # TODO make sure this is working in the correct direction, may want to interpolate instead of subtracting one second from next/previous point
+                        sub_path_time -= 1  # TODO make sure this is working AND in the correct direction, may want to interpolate instead of subtracting one second from next/previous point *TIME APPLIED TO SUBPATHS ONLY*
                         solved_path[solved_path_index] = [segment, sub_path_time]
                         solved_path_index += 1
                 solved_path[solved_path_index] = [previous_state_segment, sub_path_time]
@@ -281,23 +278,19 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
             except KeyError:
                 print('Key Error while finding path.')
                 continue
-
-        if len(solved_path) > 1:
-            optimized_solved_path = optimize_solved_path(input=solved_path)
-        elif len(solved_path) == 1:
-            print('How did this happen?')
-            pass
-        else:
-            print('See if this ever happens') # Todo see if this ever happens
+        # print('Solved Path: {0}'.format(solved_path))
+        optimized_solved_path = optimize_solved_path(input=solved_path)
+        # print('Optimized Path: {0}'.format(optimized_solved_path))
         return optimized_solved_path
-
     # Else if the GPS track has exactly one point, choose the segment candidate that has the highest probability and
     # write it directly to the output table
     elif len(gps_track) == 1:
         print('Found a gps_track with length == 1.')
         max_probable_segment = max(gps_track[0][1], key=lambda key: gps_track[0][1][key])
         print('Max probable segment is {0}'.format(max_probable_segment))
-        output_writer(table=production_table, vin=vin_number, match_route={max_probable_segment: gps_track[0][0]})
+        return {0: [max_probable_segment, gps_track[0][0]]}
+    elif len(gps_track) == 0:
+        raise ValueError('No path')
     # except ValueError as e:
     #     if str(e) == 'Point density error.':
     #         print('Gotcha.')
@@ -309,11 +302,14 @@ def street_seg_identifier(gps_points, grid, net_decay_constant=30, euclidean_dec
 
 def index_track_points(track, grid):
     """
-    Creates a dictionary storing information about each point for the given vehicle. TODO add info about de-duplication
+    Creates a dictionary storing information about each point for the given vehicle. Consecutive points that either a)
+    map to the same gridkey in the index grid or b) have the same matching single street network segment candidate are
+    ignored in the index to improve processing time and remove unnecessary redundancies from the script's outputs.
 
-    Parameters:TODO define parameters
-        track ():
-        grid (dictionary):
+    Parameters:
+        track (Feature Layer): The in memory feature layer containing the gps points for the current VIN
+        grid (dictionary): The point index containing all possible gps point locations and the street network candidate
+            segments for each point location
 
     Output: track_points is a dictionary containing information about the order of points, time of points, and street
         network segment candidates for each point. Key=point order, Value=list including point time (integer) and
@@ -350,7 +346,7 @@ def index_track_points(track, grid):
             print('{0} does not exist in the gridkey index'.format(point_search))
             continue
         except:
-            error_handler('New error, please debug.')
+            error_handler('New error, please debug - 0.')
         # If the point is not the final point in the track
         if track_count != track_total:
             # If the point has no street segment candidates, ignore and move on to the next point
@@ -439,14 +435,14 @@ def index_track_points(track, grid):
                         point_index += 1
         # If the point is the final point in the track
         else:
-            # TODO We've ignored if the point before the final point should be skipped.  Check this logic
             if candidate_trigger:
-
-                track_points[point_index] = previous_candidates
-                point_index += 1
+                if candidates.keys() != previous_candidates[1].keys():
+                    track_points[point_index] = previous_candidates
+                    point_index += 1
             if gridkey_trigger:
-                track_points[point_index] = previous_gridkey[1]
-                point_index += 1
+                if point_search != previous_gridkey:
+                    track_points[point_index] = previous_gridkey[1]
+                    point_index += 1
             if len(candidates) > 0:
                 track_points[point_index] = [track_point[2], candidates]
     # Todo delete variables
@@ -470,15 +466,19 @@ def build_search_string(latitude, longitude):
 
     if len(str(latitude)) == 8:
         first_five = str(latitude)[1] + str(latitude)[3:-1]
-    else:
+    elif len(str(latitude)) < 8:
         first_five = str(latitude)[1] + str(latitude)[3:]
+    else:
+        first_five = str(latitude)[1] + str(latitude)[3:6]
     while len(first_five) < 5:
         first_five = first_five + '0'
 
     if len(str(longitude)) == 9:
         last_five = str(longitude)[2] + str(longitude)[4:-1]
-    else:
+    elif len(str(longitude)) < 9:
         last_five = str(longitude)[2] + str(longitude)[4:]
+    else:
+        last_five = str(longitude)[2] + str(longitude)[4:7]
     while len(last_five) < 5:
         last_five = last_five + '0'
 
@@ -545,11 +545,11 @@ def calculate_point_distance(segment_1_edge, segment_2_edge):
     """
     Calculate the Euclidean distance between the endpoints of two segments
 
-    Parameters: TODO define parameters
-    segment_1_edge:
-    segment_2_edge:
+    Parameters:
+    segment_1_edge (tuple): The coordinates of the endpoint of the first segment
+    segment_2_edge (tuple): The coordinates of the endpoint of the second segment
 
-    Output: TODO write output summary
+    Output: Distance between the endpoints of the two segments.
     """
     point_distance = sqrt((segment_1_edge[0] - segment_2_edge[0]) ** 2 + (segment_1_edge[1] - segment_2_edge[1]) ** 2)
     return point_distance
@@ -573,29 +573,68 @@ def calculate_network_distance_probability(distance, net_decay_constant):
     return network_distance_probability
 
 
-def optimize_solved_path(input):
+def optimize_solved_path(input_path):
     """
-    TODO Write summary
+    Removes redundant records from the solved path before writing to the output.
 
-    Parameters: TODO define parameters
-        input:
+    Parameters:
+        input_path (dictionary): The solved network path for the vehicle
 
-    Output: TODO Write output summary
+    Output: optimized_path (dictionary): Optimized solved network path with redundant records removed
     """
-    for index in range(len(input), -1, -1):
-        pass
-        # TODO Adapt code from scratch 4 to fit in this function
+    new_index = 0
+    optimized_path = {}
+    previous_segment = [None, None]
+    previous_previous_segment = [None, None]
+    index_trigger = False
+
+    for index in range(len(input_path) - 1, -1, -1):
+        if index != 0:
+            if previous_segment[0] == input_path[index][0]:
+                if previous_segment[0] == previous_previous_segment[0]:
+                    previous_previous_segment = previous_segment
+                    previous_segment = input_path[index]
+                    index_trigger = True
+                else:
+                    previous_previous_segment = previous_segment
+                    previous_segment = input_path[index]
+                    index_trigger = True
+            else:
+                if index_trigger:
+                    optimized_path[new_index] = previous_segment
+                    new_index += 1
+                    previous_previous_segment = [None, None]
+                    previous_segment = input_path[index]
+                    optimized_path[new_index] = input_path[index]
+                    new_index += 1
+                    index_trigger = False
+                else:
+                    previous_previous_segment = [None, None]
+                    previous_segment = input_path[index]
+                    optimized_path[new_index] = input_path[index]
+                    new_index += 1
+        else:
+            if index_trigger:
+                if previous_segment[0] != input_path[0][0]:
+                    optimized_path[new_index] = previous_segment
+                    new_index += 1
+            optimized_path[new_index] = input_path[index]
+    return optimized_path
 
 
 def densifier(sparse_points, threshold_meters=120):
-    # TODO Fix to set up for gridkey creation
     """
-    TODO Write function summary.
+    If a vehicle's path cannot be solved, creates additional points along a vehicles route to provide additional
+    reference points for route solving. This option can be toggled on / off and the distance threshold can be altered
+    in the config file.
 
-    Parameters: TODO define parameters
-    input:
+    Parameters:
+        sparse_points: The input points layer that could not be solved.
+        threshold_meters: The maximum distance in meters between points before additional interpolated points and times
+            are added to the vehicles path.
 
-    Output: TODO write output summary.
+    Output: Returns an in memory point layer with additional interpolated point locations and times to assist in solving
+        a vehicle's path.
     """
     sparse_points = arcpy.CopyFeatures_management(sparse_points, 'in_memory/sparse_points')
     sparse_cursor = arcpy.da.SearchCursor(in_table=sparse_points, field_names=['SHAPE@XY', 'fixtimeutf'])
@@ -632,32 +671,37 @@ def densifier(sparse_points, threshold_meters=120):
                 dense_cursor.insertRow(((midpoint[0], midpoint[1]), previous_sparse_point[2] + count * time_delta))
         previous_sparse_point = current_sparse_point
     del dense_cursor
+    arcpy.CalculateGeometryAttributes_management(in_features=sparse_points, geometry_property=[
+        ['latitude', 'POINT_Y'], ['longitude', 'POINT_X']], coordinate_system=4326)
     return arcpy.Sort_management(in_dataset=sparse_points, out_dataset='in_memory/dense_points', sort_field=[['fixtimeutf', 'ASCENDING']])
+
 
 def output_writer(table, vin, match_route):
     """
     Writes street network segment visits to the output table.
 
-    Parameters:TODO define parameters
-        table:
-        vin:
-        match_route:
+    Parameters:
+        table (Table): The output table that should be updated with new records
+        vin: The current vehicle's VIN
+        match_route: Dictionary containing the records that should be added to the output table
 
-    Output: TODO Write output summary
+    Output: No output, records are added to pre-existing table
     """
     fields = ['SEGMENT_ID', 'TIME', 'VIN']
     output_cursor = arcpy.da.InsertCursor(table, fields)
-    for seg, timestamp in match_route.items():
-        if isinstance(timestamp, list) is True:
-            try:
-                for item in timestamp:
-                    output_cursor.insertRow((str(seg), str(item), str(vin)))
-            except RuntimeError:
-                print(seg)
-                print(type(seg))
-                output_cursor.insertRow((str(seg), str(item), str(vin)))
-        else:
-            output_cursor.insertRow((str(seg), str(timestamp), str(vin)))
+    for index in match_route.values():
+        output_cursor.insertRow((str(index[0]), str(index[1]), str(vin)))
+    # for seg, timestamp in match_route.items():
+    #     if isinstance(timestamp, list) is True:
+    #         try:
+    #             for item in timestamp:
+    #                 output_cursor.insertRow((str(seg), str(item), str(vin)))
+    #         except RuntimeError:
+    #             print(seg)
+    #             print(type(seg))
+    #             output_cursor.insertRow((str(seg), str(item), str(vin)))
+    #     else:
+    #         output_cursor.insertRow((str(seg), str(timestamp), str(vin)))
 
 
 if __name__ == '__main__':
@@ -700,7 +744,7 @@ if __name__ == '__main__':
     grid_index = read_point_grid(point_grid)
     arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
                           sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
-    # arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted', out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent', out_name='testtesttest')
+    arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted', out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent', out_name='testtesttest')
     # arcpy.Copy_management(in_data='in_memory/mem_points_sorted', out_data='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent\\MapMatching.gdb\\testtesttest')
     point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin'])
     current_vin = None
@@ -711,6 +755,7 @@ if __name__ == '__main__':
         else:
             continue
         current_vin = point[0]
+    del point_cursor
     for vin_number in list_vins:
         try:
             print('Processing {0}'.format(vin_number))
@@ -720,10 +765,11 @@ if __name__ == '__main__':
 
             # TODO Test if this works faster by querying insdie of cursor in index_track_points instead of creating feature
             # layer for each vin
-            street_seg_identifier(gps_points='mem_vin_points', grid=grid_index, net_decay_constant=30,
-                                  euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+            mapped_path = street_seg_identifier(gps_points='mem_vin_points', grid=grid_index,
+                                                net_decay_constant=config['inputs']['net_decay_constant'])
+            # print('Mapped path: {0}'.format(mapped_path))
+            output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
         except ValueError as e:
-            # todo try statement to prevent extra densification loops
             if str(e) == 'Point density error.':
                 if config['options']['densify']:
                     try:
@@ -731,25 +777,34 @@ if __name__ == '__main__':
                         dense_points = densifier('mem_vin_points', threshold_meters=config['options']['densify_threshold'])
                         # arcpy.FeatureClassToFeatureClass_conversion(in_features=dense_points,
                         #                                             out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent',
-                        #                                             out_name='testdense12')
+                        #                                             out_name='testdense13')
                         # break
-                        street_seg_identifier(gps_points=dense_points, grid=grid_index, net_decay_constant=30,
-                                              euclidean_decay_constant=10, max_distance_constant=50)  # TODO place constants in config
+                        mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
+                                                            net_decay_constant=config['inputs']['net_decay_constant'])
+                        # print('x: {0}'.format(mapped_path))
+                        output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
+                        del dense_points
                     except ValueError as e:
                         if str(e) == 'Point density error.':
-                            print('Path could not be solved for {0}.'.format(vin_number))
+                            print('Vehicle path could not be solved for {0}.'.format(vin_number))
                             continue
                         else:
-                            error_handler('New error, please debug.')
+                            error_handler('New error, please debug - 1.')
                 else:
                     print('Vehicle path could not be solved, increase decay or select densify option in config.')
+            elif str(e) == 'No path':
+                print('No path for vin {0}'.format(vin_number))
+                continue
+            else:
+                error_handler('New error, please debug - 2.')
+
         except:
-            error_handler('New error, please debug.')
+            error_handler('New error, please debug - 3.')
+    arcpy.Delete_management(in_data='in_memory/mem_vin_points')
+    del grid_index
+    arcpy.Delete_management(in_data='in_memory/mem_points_sorted')
     print('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
 
-# TODO Error handle the bottleneck on point retrieval, including potential dam breaks
-#   - Dynamic window, time to last time recorded instead of constant window
-#   - If max record count, break into pieces
-# TODO Maintain some kind of point id through the seg visit table so records can be compared to the raw?
 # TODO Look at flags
 # TODO See if VIN and Assignment come through added densify points
+# TODO Need to adjust output writer for feature service
