@@ -27,8 +27,9 @@ try:
     from math import exp, sqrt
     import networkx as nx
     import numpy
+    import psycopg2
     import traceback
-    # import time
+    import time
 except ImportError:
     print('Import Error: Missing one or more libraries.')
     print(traceback.format_exc())
@@ -66,6 +67,7 @@ def point_retriever():
     else:
         query = config['inputs']['point_service_query'].format(where, fields)
     feature_service_url = baseURL + query
+    print('Pulling features from : {0}'.format(feature_service_url))
     # Create data (in memory) from the data pull
     fs = arcpy.FeatureSet()
     fs.load(feature_service_url)
@@ -74,9 +76,9 @@ def point_retriever():
     # TODO test the below if/else
     if not bool(config['projections']['api_project']):
         arcpy.Project_management(in_dataset='in_memory/mem_IncomingPoints',
-                                             out_dataset=config['working']['projected_points'],
-                                             out_coor_system=config['projections']['meter_based_projection'],
-                                             transform_method=config['projections']['transformation_method'])
+                                 out_dataset=config['working']['projected_points'],
+                                 out_coor_system=config['projections']['meter_based_projection'],
+                                 transform_method=config['projections']['transformation_method'])
         incoming_points = arcpy.CopyFeatures_management(in_features=config['working']['projected_points'],
                                                         out_feature_class='in_memory/mem_IncomingPoints_proj')
     else:
@@ -103,7 +105,8 @@ def index_network_segment_info(input_network):
             segment_end_points = {}
             segment_lengths = {}
             for segment in segment_cursor:
-                segment_end_points[segment[0]] = ((segment[1].firstPoint.X, segment[1].firstPoint.Y), (segment[1].lastPoint.X, segment[1].lastPoint.Y))
+                segment_end_points[segment[0]] = ((segment[1].firstPoint.X, segment[1].firstPoint.Y),
+                                                  (segment[1].lastPoint.X, segment[1].lastPoint.Y))
                 segment_lengths[segment[0]] = segment[1].length
             del segment_cursor
             log.info('Number of segments in the input network: {0}'.format(len(segment_end_points)))
@@ -176,7 +179,7 @@ def read_point_grid(grid):
         error_handler(str(e))
 
 
-def street_seg_identifier(gps_points, grid, net_decay_constant=30):
+def street_seg_identifier(gps_points, grid, net_decay_constant=30): #TODO carry connfig option for last point only through functions
     """
     This is the primary function in the script, inputting gps points and returning street segments on a solved path.
 
@@ -522,7 +525,8 @@ def calculate_network_transition_probability(segment_1, segment_2, input_graph, 
         minimum_pair = [0, 0, 100000]
         for i in range(0, 2):
             for j in range(0, 2):
-                d = round(calculate_point_distance(segment_1_edge=segment_1_edge[i], segment_2_edge=segment_2_edge[j]), 2)
+                d = round(calculate_point_distance(segment_1_edge=segment_1_edge[i],
+                                                   segment_2_edge=segment_2_edge[j]), 2)
                 if d < minimum_pair[2]:
                     minimum_pair = [i, j, d]
         segment_1_point = segment_1_edge[minimum_pair[0]]
@@ -546,7 +550,8 @@ def calculate_network_transition_probability(segment_1, segment_2, input_graph, 
             except nx.NetworkXNoPath:
                 # If NetworkX returns a no path error, set  distance to a larger number
                 distance = 3 * net_decay_constant
-    return calculate_network_distance_probability(distance=distance, net_decay_constant=net_decay_constant), sub_path, segment_2_point
+    return calculate_network_distance_probability(distance=distance, net_decay_constant=net_decay_constant), \
+        sub_path, segment_2_point
 
 
 
@@ -593,6 +598,8 @@ def optimize_solved_path(input_path):
 
     Output: optimized_path (dictionary): Optimized solved network path with redundant records removed
     """
+
+
     new_index = 0
     optimized_path = {}
     previous_segment = None
@@ -681,7 +688,8 @@ def densifier(sparse_points, threshold_meters=120):
         current_sparse_point = (listed_point[0], listed_point[1], listed_point[2])
         if previous_sparse_point:
             # Calculate the distance between the current point and the previous
-            distance = sqrt((current_sparse_point[0] - previous_sparse_point[0]) ** 2 + (current_sparse_point[1] - previous_sparse_point[1]) ** 2)
+            distance = sqrt((current_sparse_point[0] - previous_sparse_point[0]) ** 2 + (current_sparse_point[1] -
+                                                                                         previous_sparse_point[1]) ** 2)
             # If distance is < threshold meters, there is no need to add additional points
             if distance < threshold_meters:
                 previous_sparse_point = current_sparse_point
@@ -705,24 +713,44 @@ def densifier(sparse_points, threshold_meters=120):
     del dense_cursor
     arcpy.CalculateGeometryAttributes_management(in_features=sparse_points, geometry_property=[
         ['latitude', 'POINT_Y'], ['longitude', 'POINT_X']], coordinate_system=4326)
-    return arcpy.Sort_management(in_dataset=sparse_points, out_dataset='in_memory/dense_points', sort_field=[['fixtimeutf', 'ASCENDING']])
+    return arcpy.Sort_management(in_dataset=sparse_points, out_dataset='in_memory/dense_points',
+                                 sort_field=[['fixtimeutf', 'ASCENDING']])
 
 
-def output_writer(table, vin, match_route):
+# def output_writer(table, vin, match_route):
+#     """
+#     Writes street network segment visits to the output table.
+#
+#     Parameters:
+#         table (Table): The output table that should be updated with new records
+#         vin: The current vehicle's VIN
+#         match_route: Dictionary containing the records that should be added to the output table
+#
+#     Output: No output, records are added to pre-existing table
+#     """
+#     fields = ['SEGMENT_ID', 'TIME', 'VIN']
+#     output_cursor = arcpy.da.InsertCursor(table, fields)
+#     for index in match_route.values():
+#         output_cursor.insertRow((str(index[0]), str(index[1]), str(vin)))
+
+
+def output_writer(connection, cursor, sql, vin, assignment, match_route):
     """
     Writes street network segment visits to the output table.
 
     Parameters:
-        table (Table): The output table that should be updated with new records
+        connection:
+        cursor:
+        sql:
         vin: The current vehicle's VIN
+        assignment: Vehicle's assignment (Sanitation, Highways, etc)
         match_route: Dictionary containing the records that should be added to the output table
 
     Output: No output, records are added to pre-existing table
     """
-    fields = ['SEGMENT_ID', 'TIME', 'VIN']
-    output_cursor = arcpy.da.InsertCursor(table, fields)
     for index in match_route.values():
-        output_cursor.insertRow((str(index[0]), str(index[1]), str(vin)))
+        cursor.execute(sql, {'seg': index[0], 'ts': index[1], 'vin': vin, 'asg': assignment})
+        connection.commit()
 
 
 if __name__ == '__main__':
@@ -737,12 +765,13 @@ if __name__ == '__main__':
         log.setLevel(logging.INFO)
         handler = logging.FileHandler(log_file_path)
         handler.setLevel(logging.INFO)
-        handlerFormatter = logging.Formatter('%(name)s (%(levelname)s)-%(asctime)s: %(message)s', '%m/%d/%Y  %I:%M:%S %p')
+        handlerFormatter = logging.Formatter('%(name)s (%(levelname)s)-%(asctime)s: %(message)s',
+                                             '%m/%d/%Y  %I:%M:%S %p')
         handler.setFormatter(handlerFormatter)
         log.addHandler(handler)
         log.info('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
     except KeyError:
-        error_handler('Make sure config file exists and contains a log_file variable under "street-segment-identifier".')
+        error_handler('Make sure config file exists and contains a log_file variable.')
 
     scriptStart = datetime.datetime.timestamp(datetime.datetime.now())
     print('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
@@ -754,7 +783,13 @@ if __name__ == '__main__':
     points = point_retriever()
     point_grid = os.path.join(arcpy.env.workspace, config['inputs']['point_grid'])
     production_table = os.path.join(arcpy.env.workspace, config['outputs']['production_table'])
-
+    production_table_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
+        config['outputs']['database_name'], config['outputs']['database_user'], config['outputs']['database_host'],
+        config['outputs']['database_password'])
+    production_table_connection = psycopg2.connect(production_table_dns)
+    production_table_cursor = production_table_connection.cursor()
+    production_table_sql = "INSERT INTO segment_visits_test (segment_id, time_visited, vin, vehicle_assignment) " \
+                           "VALUES (%(seg)s, %(ts)s, %(vin)s, %(asg)s)"
     # Read / index street network and create network graph
     segment_info = index_network_segment_info(input_network=street_network)
     endpoints = segment_info[0]
@@ -763,21 +798,30 @@ if __name__ == '__main__':
 
     # Read in the point grid to capture candidate street network segments for each possible gps point
     grid_index = read_point_grid(point_grid)
-    arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
-                          sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
+    try:
+        arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
+                              sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
+    except arcpy.ExecuteError:
+        production_table_cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
+        last_point_time = production_table_cursor.fetchone()
+        time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
+        error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
+        sys.exit(1)
+
     # Make a local copy of the input data to test the results against TODO remove the following line after testing
-    arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted', out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent', out_name='testtesttest')
-    point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin'])
+    arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted',
+                                                out_path=arcpy.env.workspace, out_name='testtesttest')
+    point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin', 'vehicle_as'])
     current_vin = None
-    list_vins = []
+    dict_vins = {}
     for point in point_cursor:
         if not current_vin or current_vin != point[0]:
-            list_vins.append(point[0])
+            dict_vins[point[0]] = point[1]
         else:
             continue
         current_vin = point[0]
     del point_cursor
-    for vin_number in list_vins:
+    for vin_number in dict_vins:
         try:
             print('Processing {0}'.format(vin_number))
             arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
@@ -785,21 +829,24 @@ if __name__ == '__main__':
                                               workspace='in_memory')
             mapped_path = street_seg_identifier(gps_points='mem_vin_points', grid=grid_index,
                                                 net_decay_constant=config['inputs']['net_decay_constant'])
-            output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
+            # output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
+            output_writer(connection=production_table_connection, cursor=production_table_cursor,
+                          sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                          match_route=mapped_path)
             del mapped_path
         except ValueError as e:
             if str(e) == 'Point density error.':
                 if config['options']['densify']:
                     try:
                         print('Attempting to densify points and repeat the identifier function.')
-                        dense_points = densifier('mem_vin_points', threshold_meters=config['options']['densify_threshold'])
-                        # TODO remove following line after testing
-                        arcpy.FeatureClassToFeatureClass_conversion(in_features=dense_points,
-                                                                    out_path='S:\\Groups\\Enabling Technology Services\\GSG\\Projects\\Open_Projects\\GeoEvent',
-                                                                    out_name='densifytest_{0}'.format(vin_number))
+                        dense_points = densifier('mem_vin_points',
+                                                 threshold_meters=config['options']['densify_threshold'])
                         mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
                                                             net_decay_constant=config['inputs']['net_decay_constant'])
-                        output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
+                        # output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
+                        output_writer(connection=production_table_connection, cursor= production_table_cursor,
+                                      sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                                      match_route=mapped_path)
                         del dense_points
                         del mapped_path
                     except ValueError as e:
@@ -818,6 +865,9 @@ if __name__ == '__main__':
 
         except:
             error_handler('New error, please debug - 3.')
+    production_table_cursor.close()
+    production_table_connection.close()
+    log.info('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
     print('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
 
 # TODO Look at flags
