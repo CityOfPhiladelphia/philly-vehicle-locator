@@ -782,7 +782,6 @@ if __name__ == '__main__':
     street_network = config['inputs']['street_network']
     points = point_retriever()
     point_grid = os.path.join(arcpy.env.workspace, config['inputs']['point_grid'])
-    production_table = os.path.join(arcpy.env.workspace, config['outputs']['production_table'])
     production_table_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
         config['outputs']['database_name'], config['outputs']['database_user'], config['outputs']['database_host'],
         config['outputs']['database_password'])
@@ -829,7 +828,6 @@ if __name__ == '__main__':
                                               workspace='in_memory')
             mapped_path = street_seg_identifier(gps_points='mem_vin_points', grid=grid_index,
                                                 net_decay_constant=config['inputs']['net_decay_constant'])
-            # output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
             output_writer(connection=production_table_connection, cursor=production_table_cursor,
                           sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
                           match_route=mapped_path)
@@ -843,7 +841,6 @@ if __name__ == '__main__':
                                                  threshold_meters=config['options']['densify_threshold'])
                         mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
                                                             net_decay_constant=config['inputs']['net_decay_constant'])
-                        # output_writer(table=production_table, vin=vin_number, match_route=mapped_path)
                         output_writer(connection=production_table_connection, cursor= production_table_cursor,
                                       sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
                                       match_route=mapped_path)
