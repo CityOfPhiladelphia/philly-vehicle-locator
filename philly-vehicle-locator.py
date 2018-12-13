@@ -17,17 +17,15 @@ import os
 import sys
 try:
     from ast import literal_eval
-    # from collections import OrderedDict
     from configparser import ConfigParser
-    import datetime
-    # from datetime import date, timedelta, timezone
-    # from itertools import repeat
+    from datetime import datetime as dt, timedelta
     import arcpy
     import logging
     from math import exp, sqrt
     import networkx as nx
     import numpy
     import psycopg2
+    import pytz
     import traceback
     import time
 except ImportError:
@@ -46,17 +44,17 @@ def error_handler(log_string='Script failed.'):
     print(traceback.format_exc())
 
 
-def point_retriever():
+def point_retriever(start_time):
     """Retrieves points from hosted feature service containing gps points from GeoEvent Server & Network Fleet for
      previous config defined amount of time. Projects points into meter based projection in one of two ways depending on
      configuration. If default transformation method is acceptable, api_project should be set to True.  Otherwise, it
      must be set to False, with a transformation method provided."""
-    # Determine the current time in UNIX time, this also represents the end of the time period in which points should
+    # Determine the start time in UNIX time, this also represents the end of the time period in which points should
     # be pulled from
-    current_time_utc = int(datetime.datetime.timestamp(datetime.datetime.now()))
+    start_time_utc = int(start_time)
     # Determine the beginning of the time period in which points should be pulled from, default is 960 seconds (16
     # minutes) before the current time
-    start_slice_utc = current_time_utc - int(config['inputs']['point_service_pull_time'])
+    start_slice_utc = start_time_utc - int(config['inputs']['point_service_pull_time'])
     # Build the feature service URL, based on config inputs
     baseURL = config['inputs']['point_service_baseurl']
     where = config['inputs']['point_service_where'].format(start_slice_utc)
@@ -109,7 +107,6 @@ def index_network_segment_info(input_network):
                                                   (segment[1].lastPoint.X, segment[1].lastPoint.Y))
                 segment_lengths[segment[0]] = segment[1].length
             del segment_cursor
-            log.info('Number of segments in the input network: {0}'.format(len(segment_end_points)))
             print('Number of segments in the input network: {0}'.format(len(segment_end_points)))
             return segment_end_points, segment_lengths
         else:
@@ -136,7 +133,6 @@ def create_network_graph(input_network, segment_lengths):
             graph = nx.read_shp(network_file_path)
             # Select the largest connected component of the network graph.
             subgraph = list(nx.connected_component_subgraphs(graph.to_undirected()))[0]
-            log.info('Graph size (excluding unconnected parts): {0}'.format(len(graph)))
             print('Graph size (excluding unconnected parts): {0}'.format(len(graph)))
             # Append the length of each road segment as an attribute to the edges in the network subgraph.
             for node_0, node_1 in subgraph.edges():
@@ -717,24 +713,7 @@ def densifier(sparse_points, threshold_meters=120):
                                  sort_field=[['fixtimeutf', 'ASCENDING']])
 
 
-# def output_writer(table, vin, match_route):
-#     """
-#     Writes street network segment visits to the output table.
-#
-#     Parameters:
-#         table (Table): The output table that should be updated with new records
-#         vin: The current vehicle's VIN
-#         match_route: Dictionary containing the records that should be added to the output table
-#
-#     Output: No output, records are added to pre-existing table
-#     """
-#     fields = ['SEGMENT_ID', 'TIME', 'VIN']
-#     output_cursor = arcpy.da.InsertCursor(table, fields)
-#     for index in match_route.values():
-#         output_cursor.insertRow((str(index[0]), str(index[1]), str(vin)))
-
-
-def output_writer(connection, cursor, sql, vin, assignment, match_route):
+def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_duplicate_check):
     """
     Writes street network segment visits to the output table.
 
@@ -748,9 +727,77 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route):
 
     Output: No output, records are added to pre-existing table
     """
-    for index in match_route.values():
-        cursor.execute(sql, {'seg': index[0], 'ts': index[1], 'vin': vin, 'asg': assignment})
-        connection.commit()
+    duplicate_check = True
+    timezone_time_now = dt.now(pytz.timezone(config['inputs']['timezone']))
+    time_difference = int(timezone_time_now.utcoffset().total_seconds())
+
+    # Check to see if the vehicle exists in the output segment visits table
+    if vin in dict_duplicate_check:
+        # If the vehicle exists, for each new segment visit in the vehicle's solved route
+        for index in match_route.values():
+            timestamp = dt.utcfromtimestamp(index[1] + time_difference)
+            # Check for script period overlap and handle any overlapping segment visits
+            if duplicate_check:
+                # If the new segment visit is older than the last segment visit written in the table
+                if index[1] < dict_duplicate_check[vin][1]: # TODO This will need to be altered to account for potential points that need to be kept to prevent disconnect
+                    # Skip this segment visit and continue to the next (Overlap between script runs can create this
+                    # scenario. Several points from the previous run are included in each script period in order to help
+                    # ensure the route for each new period can be accurately solved. This option is configurable.
+                    continue
+                # If the new segment visit is at the same time as the last segment visit written in the table
+                elif index[1] == dict_duplicate_check[vin][1]: # TODO This is not the disconnect but may also need to be altered
+                    # If the new segment visit is at the same street segment as the last segment visit written in the
+                    # table, stop checking for script period overlap, skip this segment, and continue to the next
+                    if index[0] == dict_duplicate_check[vin][0]:
+                        duplicate_check = False
+                        continue
+                    # If the new segment visit is at a different street segment as the last segment visit written in the
+                    # table, update the record written in the table to reflect the new segment. It is assumed that new
+                    # information provided has allowed this record to be solved more accurately than during the previous
+                    # script period. Also, stop checking for script period overlap.
+                    else: # TODO This is the disconnect
+                        log.info('VIN: {3} - OID: {0} had segment_id updated from {1} to {2}'.format(dict_duplicate_check[vin][2], dict_duplicate_check[vin][0], index[0], vin))
+                        segment_visits_update_sql = "UPDATE {0} SET segment_id = '{1}' WHERE objectid = " \
+                                                    "{2}".format(config['outputs']['segment_visits_table'],
+                                                                 index[0], dict_duplicate_check[vin][2])
+                        cursor.execute(segment_visits_update_sql)
+                        connection.commit()
+                        duplicate_check = False
+                # Else the new segment visit is newer than the last segment visit written in the table
+                else:
+                    # If the new segment visit is at the same street segment as the last segment visit written in the
+                    # table, stop checking for script period overlap and update the record written in the table to
+                    # reflect the new time visited.  It is assumed that the vehicle had not yet left the street segment
+                    # in the previous script period and new information provided has allowed us to more accurately say
+                    # when the vehicle last visited the street segment. Also, stop checking for script period overlap.
+                    if index[0] == dict_duplicate_check[vin][0]:
+                        log.info('VIN: {3} - OID: {0} had time updated from {1} to {2}'.format(dict_duplicate_check[vin][2], dict_duplicate_check[vin][1], index[1], vin))
+                        segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
+                                                    "WHERE objectid = " \
+                                                    "{3}".format(config['outputs']['segment_visits_table'],
+                                                                 timestamp, index[1], dict_duplicate_check[vin][2])
+                        cursor.execute(segment_visits_update_sql)
+                        connection.commit()
+                        duplicate_check = False
+                    # If the new segment visit is at a different street segment than the last segment visit written in
+                    # the table, insert the new record and stop checking for script period overlap.
+                    else:
+                        cursor.execute(sql, {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin,
+                                             'asg': assignment})
+                        connection.commit()
+                        duplicate_check = False
+            # Script period overlap has already been detected and overlapping segment visits have been handled, insert
+            # all new records to the output table
+            else:
+                cursor.execute(sql,
+                               {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin, 'asg': assignment})
+                connection.commit()
+    # If the vehicle does not exist, there is no possible script period overlap. Insert all new records to the table.
+    else:
+        for index in match_route.values():
+            timestamp = dt.utcfromtimestamp(index[1] + time_difference)
+            cursor.execute(sql, {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin, 'asg': assignment})
+            connection.commit()
 
 
 if __name__ == '__main__':
@@ -769,26 +816,46 @@ if __name__ == '__main__':
                                              '%m/%d/%Y  %I:%M:%S %p')
         handler.setFormatter(handlerFormatter)
         log.addHandler(handler)
-        log.info('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
     except KeyError:
         error_handler('Make sure config file exists and contains a log_file variable.')
 
-    scriptStart = datetime.datetime.timestamp(datetime.datetime.now())
-    print('Script started: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
+    # timezone_time_now = dt.now(pytz.timezone(config['inputs']['timezone']))
+    # time_difference = int(dt.now(pytz.timezone(config['inputs']['timezone'])).utcoffset().total_seconds())
+    update_time = int(config['inputs']['update_time_minutes']) * 60
+    scriptStart = int(dt.timestamp(dt.now()) // update_time * update_time)
+    log.info('Script started using UNIX time: {0} ({1} local time)'.format(
+        scriptStart, dt.utcfromtimestamp(scriptStart + int(dt.now(
+            pytz.timezone(config['inputs']['timezone'])).utcoffset().total_seconds())).strftime('%c %Z')))
+    print('Script started using UNIX time: {0} ({1} local time)'.format(
+        scriptStart, dt.utcfromtimestamp(scriptStart + int(dt.now(
+            pytz.timezone(config['inputs']['timezone'])).utcoffset().total_seconds())).strftime('%c %Z')))
 
     # Prepare inputs for script
     arcpy.env.overwriteOutput = config['environment']['env_overwrite']
     arcpy.env.workspace = config['environment']['env_workspace']
     street_network = config['inputs']['street_network']
-    points = point_retriever()
+    points = point_retriever(start_time=scriptStart)
     point_grid = os.path.join(arcpy.env.workspace, config['inputs']['point_grid'])
-    production_table_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
+    production_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
         config['outputs']['database_name'], config['outputs']['database_user'], config['outputs']['database_host'],
         config['outputs']['database_password'])
-    production_table_connection = psycopg2.connect(production_table_dns)
-    production_table_cursor = production_table_connection.cursor()
-    production_table_sql = "INSERT INTO segment_visits_test (segment_id, time_visited, vin, vehicle_assignment) " \
-                           "VALUES (%(seg)s, %(ts)s, %(vin)s, %(asg)s)"
+    production_database_connection = psycopg2.connect(production_database_dns)
+    production_database_cursor = production_database_connection.cursor()
+    segment_visits_select_sql = "SELECT objectid, segment_id, time_visited_unix, sv1.vin FROM {0} sv1 JOIN (SELECT " \
+                                "vin, max(time_visited_unix) as maxtime FROM {0} GROUP BY VIN) sv2 ON " \
+                                "sv1.vin = sv2.vin AND sv1.time_visited_unix = " \
+                                "sv2.maxtime".format(config['outputs']['segment_visits_table'])
+    segment_visits_insert_sql = "INSERT INTO {0} (segment_id, time_visited, time_visited_unix, vin, " \
+                               "vehicle_assignment) VALUES (%(seg)s, %(ts)s, %(ts_unix)s, %(vin)s, " \
+                               "%(asg)s)".format(config['outputs']['segment_visits_table'])
+    most_recent_visit_update_sql = "UPDATE {0} SET vin = a.vin, time_visited=a.time_visited, time_visited_unix = " \
+                                  "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, time_since_visited " \
+                                  "= {2} - a.time_visited_unix, time_since_visit = (({2} - a.time_visited_unix) * interval '1 sec') FROM {1} a INNER JOIN(SELECT segment_id, " \
+                                  "MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY segment_id) b ON " \
+                                  "a.segment_id = b.segment_id AND a.time_visited_unix = b.time_visited_unix WHERE " \
+                                  "{0}.objectid = a.segment_id".format(config['outputs']['most_recent_visit_table'],
+                                                                       config['outputs']['segment_visits_table'],
+                                                                       scriptStart)
     # Read / index street network and create network graph
     segment_info = index_network_segment_info(input_network=street_network)
     endpoints = segment_info[0]
@@ -798,18 +865,23 @@ if __name__ == '__main__':
     # Read in the point grid to capture candidate street network segments for each possible gps point
     grid_index = read_point_grid(point_grid)
     try:
-        arcpy.Sort_management(in_dataset=points, out_dataset='in_memory/mem_points_sorted',
+        arcpy.Sort_management(in_dataset=points[0], out_dataset='in_memory/mem_points_sorted',
                               sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
     except arcpy.ExecuteError:
-        production_table_cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
-        last_point_time = production_table_cursor.fetchone()
+        production_database_cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
+        last_point_time = production_database_cursor.fetchone()
         time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
         error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
         sys.exit(1)
 
-    # Make a local copy of the input data to test the results against TODO remove the following line after testing
-    arcpy.FeatureClassToFeatureClass_conversion(in_features='in_memory/mem_points_sorted',
-                                                out_path=arcpy.env.workspace, out_name='testtesttest')
+    production_database_cursor.execute(segment_visits_select_sql)
+    dict_most_recent_vin_record = {}
+    for vin in production_database_cursor.fetchall():
+        dict_most_recent_vin_record[vin[3]] = [vin[1], vin[2], vin[0]]
+    for k, v in dict_most_recent_vin_record.items():
+        print(k, v)
+
+
     point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin', 'vehicle_as'])
     current_vin = None
     dict_vins = {}
@@ -828,9 +900,9 @@ if __name__ == '__main__':
                                               workspace='in_memory')
             mapped_path = street_seg_identifier(gps_points='mem_vin_points', grid=grid_index,
                                                 net_decay_constant=config['inputs']['net_decay_constant'])
-            output_writer(connection=production_table_connection, cursor=production_table_cursor,
-                          sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
-                          match_route=mapped_path)
+            output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                          sql=segment_visits_insert_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                          match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
             del mapped_path
         except ValueError as e:
             if str(e) == 'Point density error.':
@@ -841,9 +913,9 @@ if __name__ == '__main__':
                                                  threshold_meters=config['options']['densify_threshold'])
                         mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
                                                             net_decay_constant=config['inputs']['net_decay_constant'])
-                        output_writer(connection=production_table_connection, cursor= production_table_cursor,
-                                      sql=production_table_sql, vin=vin_number, assignment=dict_vins[vin_number],
-                                      match_route=mapped_path)
+                        output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                                      sql=segment_visits_insert_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                                      match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
                         del dense_points
                         del mapped_path
                     except ValueError as e:
@@ -859,13 +931,15 @@ if __name__ == '__main__':
                 continue
             else:
                 error_handler('New error, please debug - 2.')
-
         except:
             error_handler('New error, please debug - 3.')
-    production_table_cursor.close()
-    production_table_connection.close()
-    log.info('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
-    print('Script ended: {0}'.format(datetime.datetime.now().strftime('%c %Z')))
+    # print(most_recent_visit_update_sql)
+    production_database_cursor.execute(most_recent_visit_update_sql)
+    production_database_connection.commit()
+    production_database_cursor.close()
+    production_database_connection.close()
+    log.info('Script ended: {0}'.format(dt.now().strftime('%c %Z')))
+    print('Script ended: {0}'.format(dt.now().strftime('%c %Z')))
 
 # TODO Look at flags
 # TODO See if VIN and Assignment come through added densify points
