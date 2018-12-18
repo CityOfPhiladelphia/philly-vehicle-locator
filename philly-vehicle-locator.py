@@ -733,19 +733,34 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
 
     # Check to see if the vehicle exists in the output segment visits table
     if vin in dict_duplicate_check:
+        log.info('VIN: {0}'.format(vin))
         # If the vehicle exists, for each new segment visit in the vehicle's solved route
         for index in match_route.values():
             timestamp = dt.utcfromtimestamp(index[1] + time_difference)
             # Check for script period overlap and handle any overlapping segment visits
             if duplicate_check:
                 # If the new segment visit is older than the last segment visit written in the table
-                if index[1] < dict_duplicate_check[vin][1]: # TODO This will need to be altered to account for potential points that need to be kept to prevent disconnect
-                    # Skip this segment visit and continue to the next (Overlap between script runs can create this
-                    # scenario. Several points from the previous run are included in each script period in order to help
-                    # ensure the route for each new period can be accurately solved. This option is configurable.
-                    continue
+                if index[1] < dict_duplicate_check[vin][1]:
+                    # If the new segment visit is older than the last segment visit written in the table and the new
+                    # visit is at a different segment than the last visit, assume the new record is redundant to
+                    # information already in the table and continue
+                    if index[0] != dict_duplicate_check[vin][0]:
+                        continue
+                    # If the segment visit is older than the last segment visit written in the table and the new visit
+                    # is at the same segment as the last visit written, assume that there has been a correction made to
+                    # the last visit written in the new run of the script.  Adjust the the timestamp to match that of
+                    # the new visit.  The original time stamp will possibly reappear in the table with the next segment
+                    # written or disappear.  Stop checking for script period overlap.
+                    else:
+                        segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
+                                                    "WHERE objectid = " \
+                                                    "{3}".format(config['outputs']['segment_visits_table'],
+                                                                 timestamp, index[1], dict_duplicate_check[vin][2])
+                        cursor.execute(segment_visits_update_sql)
+                        connection.commit()
+                        duplicate_check = False
                 # If the new segment visit is at the same time as the last segment visit written in the table
-                elif index[1] == dict_duplicate_check[vin][1]: # TODO This is not the disconnect but may also need to be altered
+                elif index[1] == dict_duplicate_check[vin][1]:
                     # If the new segment visit is at the same street segment as the last segment visit written in the
                     # table, stop checking for script period overlap, skip this segment, and continue to the next
                     if index[0] == dict_duplicate_check[vin][0]:
@@ -755,8 +770,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # table, update the record written in the table to reflect the new segment. It is assumed that new
                     # information provided has allowed this record to be solved more accurately than during the previous
                     # script period. Also, stop checking for script period overlap.
-                    else: # TODO This is the disconnect
-                        log.info('VIN: {3} - OID: {0} had segment_id updated from {1} to {2}'.format(dict_duplicate_check[vin][2], dict_duplicate_check[vin][0], index[0], vin))
+                    else:
                         segment_visits_update_sql = "UPDATE {0} SET segment_id = '{1}' WHERE objectid = " \
                                                     "{2}".format(config['outputs']['segment_visits_table'],
                                                                  index[0], dict_duplicate_check[vin][2])
@@ -771,7 +785,6 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # in the previous script period and new information provided has allowed us to more accurately say
                     # when the vehicle last visited the street segment. Also, stop checking for script period overlap.
                     if index[0] == dict_duplicate_check[vin][0]:
-                        log.info('VIN: {3} - OID: {0} had time updated from {1} to {2}'.format(dict_duplicate_check[vin][2], dict_duplicate_check[vin][1], index[1], vin))
                         segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
                                                     "WHERE objectid = " \
                                                     "{3}".format(config['outputs']['segment_visits_table'],
@@ -790,13 +803,15 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
             # all new records to the output table
             else:
                 cursor.execute(sql,
-                               {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin, 'asg': assignment})
+                               {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin,
+                                'asg': assignment})
                 connection.commit()
     # If the vehicle does not exist, there is no possible script period overlap. Insert all new records to the table.
     else:
         for index in match_route.values():
             timestamp = dt.utcfromtimestamp(index[1] + time_difference)
-            cursor.execute(sql, {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin, 'asg': assignment})
+            cursor.execute(sql, {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin,
+                                 'asg': assignment})
             connection.commit()
 
 
