@@ -728,15 +728,16 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
     Output: No output, records are added to pre-existing table
     """
     duplicate_check = True
-    timezone_time_now = dt.now(pytz.timezone(config['inputs']['timezone']))
-    time_difference = int(timezone_time_now.utcoffset().total_seconds())
+    # timezone_time_now = dt.now(pytz.timezone(config['inputs']['timezone']))
+    # time_difference = int(timezone_time_now.utcoffset().total_seconds())
 
     # Check to see if the vehicle exists in the output segment visits table
     if vin in dict_duplicate_check:
         log.info('VIN: {0}'.format(vin))
         # If the vehicle exists, for each new segment visit in the vehicle's solved route
         for index in match_route.values():
-            timestamp = dt.utcfromtimestamp(index[1] + time_difference)
+            timestamp = dt.utcfromtimestamp(index[1])
+            # timestamp = dt.utcfromtimestamp(index[1] + time_difference)
             # Check for script period overlap and handle any overlapping segment visits
             if duplicate_check:
                 # If the new segment visit is older than the last segment visit written in the table
@@ -752,6 +753,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # the new visit.  The original time stamp will possibly reappear in the table with the next segment
                     # written or disappear.  Stop checking for script period overlap.
                     else:
+                        log.info("Changed oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],index[1], dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
                                                     "WHERE objectid = " \
                                                     "{3}".format(config['outputs']['segment_visits_table'],
@@ -771,6 +773,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # information provided has allowed this record to be solved more accurately than during the previous
                     # script period. Also, stop checking for script period overlap.
                     else:
+                        log.info("Changed oid {2} segment from {0} to {1}".format(dict_duplicate_check[vin][0], index[0], dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET segment_id = '{1}' WHERE objectid = " \
                                                     "{2}".format(config['outputs']['segment_visits_table'],
                                                                  index[0], dict_duplicate_check[vin][2])
@@ -785,6 +788,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # in the previous script period and new information provided has allowed us to more accurately say
                     # when the vehicle last visited the street segment. Also, stop checking for script period overlap.
                     if index[0] == dict_duplicate_check[vin][0]:
+                        log.info("Updated oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],index[1], dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
                                                     "WHERE objectid = " \
                                                     "{3}".format(config['outputs']['segment_visits_table'],
@@ -809,7 +813,8 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
     # If the vehicle does not exist, there is no possible script period overlap. Insert all new records to the table.
     else:
         for index in match_route.values():
-            timestamp = dt.utcfromtimestamp(index[1] + time_difference)
+            timestamp = dt.utcfromtimestamp(index[1])
+            # timestamp = dt.utcfromtimestamp(index[1] + time_difference)
             cursor.execute(sql, {'seg': index[0], 'ts': timestamp, 'ts_unix': index[1], 'vin': vin,
                                  'asg': assignment})
             connection.commit()
@@ -864,13 +869,17 @@ if __name__ == '__main__':
                                "vehicle_assignment) VALUES (%(seg)s, %(ts)s, %(ts_unix)s, %(vin)s, " \
                                "%(asg)s)".format(config['outputs']['segment_visits_table'])
     most_recent_visit_update_sql = "UPDATE {0} SET vin = a.vin, time_visited=a.time_visited, time_visited_unix = " \
-                                  "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, time_since_visited " \
-                                  "= {2} - a.time_visited_unix, time_since_visit = (({2} - a.time_visited_unix) * interval '1 sec') FROM {1} a INNER JOIN(SELECT segment_id, " \
+                                  "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, seconds_since_visit " \
+                                  "= {2} - a.time_visited_unix, time_since_visit = trim(leading ' ' from to_char(FLOOR(({2} - a.time_visited_unix) / 86400), '0009')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} - a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * 60, '09')) FROM {1} a INNER JOIN(SELECT segment_id, " \
                                   "MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY segment_id) b ON " \
                                   "a.segment_id = b.segment_id AND a.time_visited_unix = b.time_visited_unix WHERE " \
-                                  "{0}.objectid = a.segment_id".format(config['outputs']['most_recent_visit_table'],
+                                  "{0}.segment_id = a.segment_id".format(config['outputs']['most_recent_visit_table'],
                                                                        config['outputs']['segment_visits_table'],
                                                                        scriptStart)
+
+    # select time_since_visited, time_since_visit, FLOOR(time_since_visited / 86400) || ':' || trim( leading ' ' from to_char(FLOOR((time_since_visited / 3600) - floor(time_since_visited / 86400) * 24), '09')) || ':' || trim( leading ' ' from to_char(FLOOR((time_since_visited / 60) - FLOOR(time_since_visited / 3600) * 60), '09'))  || ':' || trim( leading ' ' from to_char(time_since_visited - FLOOR(time_since_visited / 60) * 60, '09')) from test_pvl_most_recent_segment_visit_streets where objectid_1 = 44023
+    # FLOOR(({2} - a.time_visited_unix) / 86400) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} - a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * 60, '09'))
+
     # Read / index street network and create network graph
     segment_info = index_network_segment_info(input_network=street_network)
     endpoints = segment_info[0]
