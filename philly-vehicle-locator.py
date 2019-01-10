@@ -21,7 +21,7 @@ try:
     from datetime import datetime as dt, timedelta
     import arcpy
     import logging
-    from math import exp, sqrt
+    from math import exp, sqrt, radians, cos, sin, asin
     import networkx as nx
     import numpy
     import psycopg2
@@ -44,43 +44,31 @@ def error_handler(log_string='Script failed.'):
     print(traceback.format_exc())
 
 
-def point_retriever(start_time):
+def point_retriever(cursor, sql):
     """Retrieves points from hosted feature service containing gps points from GeoEvent Server & Network Fleet for
      previous config defined amount of time. Projects points into meter based projection in one of two ways depending on
      configuration. If default transformation method is acceptable, api_project should be set to True.  Otherwise, it
      must be set to False, with a transformation method provided."""
-    # Determine the start time in UNIX time, this also represents the end of the time period in which points should
-    # be pulled from
-    start_time_utc = int(start_time)
-    # Determine the beginning of the time period in which points should be pulled from, default is 960 seconds (16
-    # minutes) before the current time
-    start_slice_utc = start_time_utc - int(config['inputs']['point_service_pull_time'])
-    # Build the feature service URL, based on config inputs
-    baseURL = config['inputs']['point_service_baseurl']
-    where = config['inputs']['point_service_where'].format(start_slice_utc)
-    fields = config['inputs']['point_service_fields']
-    if bool(config['projections']['api_project']):
-        query_projection = config['projections']['meter_based_projection']
-        query = config['inputs']['point_service_query_project'].format(where, fields, query_projection)
-    else:
-        query = config['inputs']['point_service_query'].format(where, fields)
-    feature_service_url = baseURL + query
-    print('Pulling features from : {0}'.format(feature_service_url))
-    # Create data (in memory) from the data pull
-    fs = arcpy.FeatureSet()
-    fs.load(feature_service_url)
-    arcpy.CopyFeatures_management(in_features=fs, out_feature_class='in_memory/mem_IncomingPoints')
-    del fs
-    # TODO test the below if/else
-    if not bool(config['projections']['api_project']):
-        arcpy.Project_management(in_dataset='in_memory/mem_IncomingPoints',
-                                 out_dataset=config['working']['projected_points'],
-                                 out_coor_system=config['projections']['meter_based_projection'],
-                                 transform_method=config['projections']['transformation_method'])
-        incoming_points = arcpy.CopyFeatures_management(in_features=config['working']['projected_points'],
-                                                        out_feature_class='in_memory/mem_IncomingPoints_proj')
-    else:
-        incoming_points = 'in_memory/mem_IncomingPoints'
+    cursor.execute(sql)
+    current_vin = None
+    incoming_points = {}
+    point_list = cursor.fetchall()
+    log.info('Number of points: {0}'.format(len(point_list)))
+    if len(point_list) < 1:
+        cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
+        last_point_time = production_database_cursor.fetchone()
+        time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
+        error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
+        sys.exit(1)
+    for gps_point in point_list:
+        if not current_vin or current_vin != gps_point[0]:
+            incoming_points[gps_point[0]] = (gps_point[4], [(gps_point[1], gps_point[2], gps_point[3])])
+        else:
+            if (gps_point[1], gps_point[2], gps_point[3]) not in incoming_points[gps_point[0]][1]:
+                incoming_points[gps_point[0]][1].append((gps_point[1], gps_point[2], gps_point[3]))
+            continue
+        current_vin = gps_point[0]
+
     return incoming_points
 
 
@@ -165,7 +153,7 @@ def read_point_grid(grid):
             point_grid_index = {}
             grid_cursor = arcpy.da.SearchCursor(grid, ['gridkey', 'candidate_segs'])
             for grid_point in grid_cursor:
-                point_grid_index[grid_point[0]] = grid_point [1]
+                point_grid_index[grid_point[0]] = grid_point[1]
             del grid_cursor
             print('Point grid size: {0}'.format(len(point_grid_index)))
             return point_grid_index
@@ -175,7 +163,7 @@ def read_point_grid(grid):
         error_handler(str(e))
 
 
-def street_seg_identifier(gps_points, grid, net_decay_constant=30): #TODO carry connfig option for last point only through functions
+def street_seg_identifier(gps_points, grid, net_decay_constant=30): #TODO carry config option for last point only through functions
     """
     This is the primary function in the script, inputting gps points and returning street segments on a solved path.
 
@@ -322,7 +310,7 @@ def index_track_points(track, grid):
     # Create dictionary to store indexed points to run through Viterbi algorithm
     track_points = {}
     # Get count of total amount of points in the track to check for indexing
-    track_total = arcpy.GetCount_management(track)
+    track_total = len(track)
     # Initialize point and index counts
     track_count = 0
     point_index = 0
@@ -335,12 +323,12 @@ def index_track_points(track, grid):
     previous_gridkey = (None, [None])
     previous_previous_gridkey = (None, [None])
     gridkey_trigger = False
-    track_point_cursor = arcpy.da.SearchCursor(in_table=track, field_names=['latitude', 'longitude', 'fixtimeutf'])
+    # track_point_cursor = arcpy.da.SearchCursor(in_table=track, field_names=['latitude', 'longitude', 'fixtimeutf'])
     # For each point in a vehicle's track
-    for track_point in track_point_cursor:
+    for track_point in track:
         track_count += 1
         # Build the search string for looking up a point's street segment candidates in the index grid
-        point_search = build_search_string(track_point[0], track_point[1])
+        point_search = build_search_string(track_point[1], track_point[2])
         # Determine if the point exists in the index grid and retrieve street segment candidates
         try:
             candidates = literal_eval(grid[point_search])
@@ -373,14 +361,14 @@ def index_track_points(track, grid):
                     if previous_candidates[1].keys() == previous_previous_candidates[1].keys():
                         # Prepare variables for next point
                         previous_previous_candidates = previous_candidates
-                        previous_candidates = [track_point[2], candidates]
+                        previous_candidates = [track_point[0], candidates]
                         # Set candidate trigger to true, signifying a single candidate point has been stored in memory
                         candidate_trigger = True
                     # Else this is the second consecutive point with a single, and matching, street segment candidate
                     else:
                         # Prepare variables for next point
                         previous_previous_candidates = previous_candidates
-                        previous_candidates = [track_point[2], candidates]
+                        previous_candidates = [track_point[0], candidates]
                         # Set candidate trigger to true, signifying a single candidate point has been stored in memory
                         candidate_trigger = True
                 # Else if the current point's single candidate is not the same as the previous's
@@ -392,9 +380,9 @@ def index_track_points(track, grid):
                         point_index += 1
                         # Prepare variables for next point
                         previous_previous_candidates = [None, {}]
-                        previous_candidates = [track_point[2], candidates]
+                        previous_candidates = [track_point[0], candidates]
                         # Index the current point
-                        track_points[point_index] = [track_point[2], candidates]
+                        track_points[point_index] = [track_point[0], candidates]
                         point_index += 1
                         # Reset the memory trigger
                         candidate_trigger = False
@@ -402,9 +390,9 @@ def index_track_points(track, grid):
                     else:
                         # Prepare variables for next point
                         previous_previous_candidates = [None, {}]
-                        previous_candidates = [track_point[2], candidates]
+                        previous_candidates = [track_point[0], candidates]
                         # Index the current point
-                        track_points[point_index] = [track_point[2], candidates]
+                        track_points[point_index] = [track_point[0], candidates]
                         point_index += 1
             else:
                 if candidate_trigger:
@@ -416,25 +404,25 @@ def index_track_points(track, grid):
                 if point_search == previous_gridkey[0]:
                     if previous_gridkey[0] == previous_previous_gridkey[0]:
                         previous_previous_gridkey = previous_gridkey
-                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        previous_gridkey = (point_search, [track_point[0], candidates])
                         gridkey_trigger = True
                     else:
                         previous_previous_gridkey = previous_gridkey
-                        previous_gridkey = (point_search, [track_point[2], candidates])
+                        previous_gridkey = (point_search, [track_point[0], candidates])
                         gridkey_trigger = True
                 else:
                     if gridkey_trigger:
                         track_points[point_index] = previous_gridkey[1]
                         point_index += 1
                         previous_previous_gridkey = (None, [None])
-                        previous_gridkey = (point_search, [track_point[2], candidates])
-                        track_points[point_index] = [track_point[2], candidates]
+                        previous_gridkey = (point_search, [track_point[0], candidates])
+                        track_points[point_index] = [track_point[0], candidates]
                         point_index += 1
                         gridkey_trigger = False
                     else:
                         previous_previous_gridkey = (None, [None])
-                        previous_gridkey = (point_search, [track_point[2], candidates])
-                        track_points[point_index] = [track_point[2], candidates]
+                        previous_gridkey = (point_search, [track_point[0], candidates])
+                        track_points[point_index] = [track_point[0], candidates]
                         point_index += 1
         # If the point is the final point in the track
         else:
@@ -447,8 +435,8 @@ def index_track_points(track, grid):
                     track_points[point_index] = previous_gridkey[1]
                     point_index += 1
             if len(candidates) > 0:
-                track_points[point_index] = [track_point[2], candidates]
-    del track_point_cursor
+                track_points[point_index] = [track_point[0], candidates]
+    # del track_point_cursor
     del candidates
     del previous_candidates
     del previous_previous_candidates
@@ -657,7 +645,7 @@ def optimize_solved_path(input_path):
     return optimized_path
 
 
-def densifier(sparse_points, threshold_meters=120):
+def densifier(sparse_points, threshold_meters=120, max_midpoints=5):
     """
     If a vehicle's path cannot be solved, creates additional points along a vehicles route to provide additional
     reference points for route solving. This option can be toggled on / off and the distance threshold can be altered
@@ -667,50 +655,48 @@ def densifier(sparse_points, threshold_meters=120):
         sparse_points: The input points layer that could not be solved.
         threshold_meters: The maximum distance in meters between points before additional interpolated points and times
             are added to the vehicles path.
+        max_midpoints:
 
     Output: Returns an in memory point layer with additional interpolated point locations and times to assist in solving
         a vehicle's path.
     """
-    sparse_points = arcpy.CopyFeatures_management(sparse_points, 'in_memory/sparse_points')
-    sparse_cursor = arcpy.da.SearchCursor(in_table=sparse_points, field_names=['SHAPE@XY', 'fixtimeutf'])
-    dense_cursor = arcpy.da.InsertCursor(in_table=sparse_points, field_names=['SHAPE@XY', 'fixtimeutf'])
+    unsorted_dense_points = []
     previous_sparse_point = None
     threshold_meters = float(threshold_meters)
-    point_list = []
-    for sparse_point in sparse_cursor:
-        point_list.append((sparse_point[0][0], sparse_point[0][1], sparse_point[1]))
-    del sparse_cursor
-    for listed_point in point_list:
-        current_sparse_point = (listed_point[0], listed_point[1], listed_point[2])
+    for sparse_point in sparse_points:
+        unsorted_dense_points.append(sparse_point)
+        current_sparse_point = sparse_point
         if previous_sparse_point:
-            # Calculate the distance between the current point and the previous
-            distance = sqrt((current_sparse_point[0] - previous_sparse_point[0]) ** 2 + (current_sparse_point[1] -
-                                                                                         previous_sparse_point[1]) ** 2)
-            # If distance is < threshold meters, there is no need to add additional points
-            if distance < threshold_meters:
+            longitude_1, latitude_1, longitude_2, latitude_2 = map(radians, [previous_sparse_point[2],
+                                                                             previous_sparse_point[1],
+                                                                             current_sparse_point[2],
+                                                                             current_sparse_point[1]])
+            distance_longitude = longitude_2 - longitude_1
+            distance_latitude = latitude_2 - latitude_1
+            total_distance = 6371000 * 2 * asin(sqrt(sin(distance_latitude / 2) ** 2 + cos(latitude_1) * cos(latitude_2) * sin(distance_longitude / 2) ** 2))
+            if total_distance <= threshold_meters:
                 previous_sparse_point = current_sparse_point
                 continue
-            # Else calculate the number of necessary midpoints
-            d = numpy.array([distance])
-            bins = numpy.array([threshold_meters, threshold_meters * 2, threshold_meters * 3, threshold_meters * 4,
-                                threshold_meters * 5])
-            midpoint_count = int(numpy.digitize(d, bins).item())
-            if midpoint_count == 5:
-                print('Long segment warning.')
-            # Calculate the distances new points will be from previous points on x and y axis
-            x_delta = (current_sparse_point[0] - previous_sparse_point[0]) / float(midpoint_count + 1)
-            y_delta = (current_sparse_point[1] - previous_sparse_point[1]) / float(midpoint_count + 1)
-            time_delta = (current_sparse_point[2] - previous_sparse_point[2]) / float(midpoint_count + 1 )
-            # Create new points and adjust the time of each point to maintain order
-            for count in range(1, midpoint_count + 1):
-                midpoint = (previous_sparse_point[0] + count * x_delta, previous_sparse_point[1] + count * y_delta)
-                dense_cursor.insertRow(((midpoint[0], midpoint[1]), previous_sparse_point[2] + count * time_delta))
+            else:
+                length = numpy.array([total_distance])
+                bin_list = []
+                for i in range(1, max_midpoints + 1):
+                    bin_list.append(threshold_meters * i)
+                bins = numpy.array(bin_list)
+                midpoint_count = int(numpy.digitize(length, bins).item())
+                if midpoint_count == max_midpoints:
+                    print('Long segment warning.')
+                x_delta = (current_sparse_point[2] - previous_sparse_point[2]) / (midpoint_count + 1)
+                y_delta = (current_sparse_point[1] - previous_sparse_point[1]) / (midpoint_count + 1)
+                time_delta = int((current_sparse_point[0] - previous_sparse_point[0]) / (midpoint_count + 1))
+                for i in range(1, midpoint_count + 1):
+                    midpoint = (previous_sparse_point[0] + (i * time_delta), previous_sparse_point[1] + (i * y_delta), previous_sparse_point[2] + (i * x_delta))
+                    unsorted_dense_points.append(midpoint)
         previous_sparse_point = current_sparse_point
-    del dense_cursor
-    arcpy.CalculateGeometryAttributes_management(in_features=sparse_points, geometry_property=[
-        ['latitude', 'POINT_Y'], ['longitude', 'POINT_X']], coordinate_system=4326)
-    return arcpy.Sort_management(in_dataset=sparse_points, out_dataset='in_memory/dense_points',
-                                 sort_field=[['fixtimeutf', 'ASCENDING']])
+    print(unsorted_dense_points)
+    sorted_dense_points = sorted(unsorted_dense_points, key=lambda tup: tup[0])
+
+    return sorted_dense_points
 
 
 def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_duplicate_check):
@@ -733,7 +719,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
 
     # Check to see if the vehicle exists in the output segment visits table
     if vin in dict_duplicate_check:
-        log.info('VIN: {0}'.format(vin))
+        # log.info('VIN: {0}'.format(vin))
         # If the vehicle exists, for each new segment visit in the vehicle's solved route
         for index in match_route.values():
             timestamp = dt.utcfromtimestamp(index[1])
@@ -753,7 +739,7 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # the new visit.  The original time stamp will possibly reappear in the table with the next segment
                     # written or disappear.  Stop checking for script period overlap.
                     else:
-                        log.info("Changed oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],index[1], dict_duplicate_check[vin][2]))
+                        # log.info("Changed oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],index[1], dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
                                                     "WHERE objectid = " \
                                                     "{3}".format(config['outputs']['segment_visits_table'],
@@ -773,7 +759,9 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # information provided has allowed this record to be solved more accurately than during the previous
                     # script period. Also, stop checking for script period overlap.
                     else:
-                        log.info("Changed oid {2} segment from {0} to {1}".format(dict_duplicate_check[vin][0], index[0], dict_duplicate_check[vin][2]))
+                        # log.info("Changed oid {2} segment from {0} to {1}".format(dict_duplicate_check[vin][0],
+                        #                                                           index[0],
+                        #                                                           dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET segment_id = '{1}' WHERE objectid = " \
                                                     "{2}".format(config['outputs']['segment_visits_table'],
                                                                  index[0], dict_duplicate_check[vin][2])
@@ -788,7 +776,9 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
                     # in the previous script period and new information provided has allowed us to more accurately say
                     # when the vehicle last visited the street segment. Also, stop checking for script period overlap.
                     if index[0] == dict_duplicate_check[vin][0]:
-                        log.info("Updated oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],index[1], dict_duplicate_check[vin][2]))
+                        # log.info("Updated oid {2} time visited from {0} to {1}".format(dict_duplicate_check[vin][1],
+                        #                                                                index[1],
+                        #                                                                dict_duplicate_check[vin][2]))
                         segment_visits_update_sql = "UPDATE {0} SET time_visited = '{1}', time_visited_unix = {2} " \
                                                     "WHERE objectid = " \
                                                     "{3}".format(config['outputs']['segment_visits_table'],
@@ -849,18 +839,24 @@ if __name__ == '__main__':
     print('Script started using UNIX time: {0} ({1} local time)'.format(
         scriptStart, dt.utcfromtimestamp(scriptStart + int(dt.now(
             pytz.timezone(config['inputs']['timezone'])).utcoffset().total_seconds())).strftime('%c %Z')))
-
+    print(scriptStart)
+    # Determine the beginning of the time period in which points should be pulled from, default is 960 seconds (16
+    # minutes) before the current time
+    slice_time_start = scriptStart - int(config['inputs']['point_service_pull_time'])
+    print(slice_time_start)
     # Prepare inputs for script
     arcpy.env.overwriteOutput = config['environment']['env_overwrite']
     arcpy.env.workspace = config['environment']['env_workspace']
     street_network = config['inputs']['street_network']
-    points = point_retriever(start_time=scriptStart)
     point_grid = os.path.join(arcpy.env.workspace, config['inputs']['point_grid'])
     production_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
         config['outputs']['database_name'], config['outputs']['database_user'], config['outputs']['database_host'],
         config['outputs']['database_password'])
     production_database_connection = psycopg2.connect(production_database_dns)
     production_database_cursor = production_database_connection.cursor()
+    gps_points_select_sql = "SELECT vin, fixtimeutf, latitude, longitude, vehicle_assignment FROM networkfleet_gps " \
+                            "WHERE fixtimeutf > {0} AND fixtimeutf < {1} AND vehicle_assignment in ('Highway', 'Sanitation') ORDER BY vin " \
+                            "asc, fixtimeutf asc".format(slice_time_start, scriptStart)
     segment_visits_select_sql = "SELECT objectid, segment_id, time_visited_unix, sv1.vin FROM {0} sv1 JOIN (SELECT " \
                                 "vin, max(time_visited_unix) as maxtime FROM {0} GROUP BY VIN) sv2 ON " \
                                 "sv1.vin = sv2.vin AND sv1.time_visited_unix = " \
@@ -879,6 +875,8 @@ if __name__ == '__main__':
 
     # select time_since_visited, time_since_visit, FLOOR(time_since_visited / 86400) || ':' || trim( leading ' ' from to_char(FLOOR((time_since_visited / 3600) - floor(time_since_visited / 86400) * 24), '09')) || ':' || trim( leading ' ' from to_char(FLOOR((time_since_visited / 60) - FLOOR(time_since_visited / 3600) * 60), '09'))  || ':' || trim( leading ' ' from to_char(time_since_visited - FLOOR(time_since_visited / 60) * 60, '09')) from test_pvl_most_recent_segment_visit_streets where objectid_1 = 44023
     # FLOOR(({2} - a.time_visited_unix) / 86400) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} - a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * 60, '09'))
+    # print(gps_points_select_sql)
+    points = point_retriever(cursor=production_database_cursor, sql=gps_points_select_sql)
 
     # Read / index street network and create network graph
     segment_info = index_network_segment_info(input_network=street_network)
@@ -888,15 +886,15 @@ if __name__ == '__main__':
 
     # Read in the point grid to capture candidate street network segments for each possible gps point
     grid_index = read_point_grid(point_grid)
-    try:
-        arcpy.Sort_management(in_dataset=points[0], out_dataset='in_memory/mem_points_sorted',
-                              sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
-    except arcpy.ExecuteError:
-        production_database_cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
-        last_point_time = production_database_cursor.fetchone()
-        time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
-        error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
-        sys.exit(1)
+    # try:
+    #     arcpy.Sort_management(in_dataset=points[0], out_dataset='in_memory/mem_points_sorted',
+    #                           sort_field=[['vin', 'ASCENDING'], ['fixtimeutf', 'ASCENDING']])
+    # except arcpy.ExecuteError:
+    #     production_database_cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
+    #     last_point_time = production_database_cursor.fetchone()
+    #     time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
+    #     error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
+    #     sys.exit(1)
 
     production_database_cursor.execute(segment_visits_select_sql)
     dict_most_recent_vin_record = {}
@@ -905,27 +903,14 @@ if __name__ == '__main__':
     for k, v in dict_most_recent_vin_record.items():
         print(k, v)
 
-
-    point_cursor = arcpy.da.SearchCursor(in_table='in_memory/mem_points_sorted', field_names=['vin', 'vehicle_as'])
-    current_vin = None
-    dict_vins = {}
-    for point in point_cursor:
-        if not current_vin or current_vin != point[0]:
-            dict_vins[point[0]] = point[1]
-        else:
-            continue
-        current_vin = point[0]
-    del point_cursor
-    for vin_number in dict_vins:
+    for vin_number in points: #TODO adjust from here
         try:
             print('Processing {0}'.format(vin_number))
-            arcpy.MakeFeatureLayer_management(in_features='in_memory/mem_points_sorted', out_layer='mem_vin_points',
-                                              where_clause=""" "vin" LIKE '{0}' """.format(vin_number),
-                                              workspace='in_memory')
-            mapped_path = street_seg_identifier(gps_points='mem_vin_points', grid=grid_index,
+            vin_points = points[vin_number][1]
+            mapped_path = street_seg_identifier(gps_points=vin_points, grid=grid_index,
                                                 net_decay_constant=config['inputs']['net_decay_constant'])
             output_writer(connection=production_database_connection, cursor=production_database_cursor,
-                          sql=segment_visits_insert_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                          sql=segment_visits_insert_sql, vin=vin_number, assignment=points[vin_number][0],
                           match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
             del mapped_path
         except ValueError as e:
@@ -933,12 +918,11 @@ if __name__ == '__main__':
                 if config['options']['densify']:
                     try:
                         print('Attempting to densify points and repeat the identifier function.')
-                        dense_points = densifier('mem_vin_points',
-                                                 threshold_meters=config['options']['densify_threshold'])
+                        dense_points = densifier(vin_points, threshold_meters=config['options']['densify_threshold'])
                         mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
                                                             net_decay_constant=config['inputs']['net_decay_constant'])
                         output_writer(connection=production_database_connection, cursor=production_database_cursor,
-                                      sql=segment_visits_insert_sql, vin=vin_number, assignment=dict_vins[vin_number],
+                                      sql=segment_visits_insert_sql, vin=vin_number, assignment=points[vin_number][0],
                                       match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
                         del dense_points
                         del mapped_path
