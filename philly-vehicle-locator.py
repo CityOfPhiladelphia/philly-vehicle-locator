@@ -4,7 +4,7 @@ File Name: philly-vehicle-locator.py
 Version: 1.0.2
 Date Created: 10/24/2018
 Author: Tim Haynes & Paul Sesink Clee
-Last Update: 11/28/2018
+Last Update: 2/14/2019
 Updater: Tim Haynes
 
 Summary: Script for consuming NetworkFleet GPS points and adapting them for street segment outputs.
@@ -62,10 +62,10 @@ def point_retriever(cursor, sql):
         sys.exit(1)
     for gps_point in point_list:
         if not current_vin or current_vin != gps_point[0]:
-            incoming_points[gps_point[0]] = (gps_point[4], [(gps_point[1], gps_point[2], gps_point[3])])
+            incoming_points[gps_point[0]] = [(gps_point[1], gps_point[2], gps_point[3])]
         else:
-            if (gps_point[1], gps_point[2], gps_point[3]) not in incoming_points[gps_point[0]][1]:
-                incoming_points[gps_point[0]][1].append((gps_point[1], gps_point[2], gps_point[3]))
+            if (gps_point[1], gps_point[2], gps_point[3]) not in incoming_points[gps_point[0]]:
+                incoming_points[gps_point[0]].append((gps_point[1], gps_point[2], gps_point[3]))
             continue
         current_vin = gps_point[0]
 
@@ -857,13 +857,14 @@ if __name__ == '__main__':
         config['outputs']['database_password'])
     production_database_connection = psycopg2.connect(production_database_dns)
     production_database_cursor = production_database_connection.cursor()
-    gps_points_select_sql = "SELECT vin, fixtimeutf, latitude, longitude, vehicle_assignment FROM networkfleet_gps " \
-                            "WHERE fixtimeutf > {0} AND fixtimeutf < {1} AND vehicle_assignment in ('Highway', " \
-                            "'Sanitation') ORDER BY vin asc, fixtimeutf asc".format(slice_time_start, scriptStart)
+    gps_points_select_sql = "SELECT vin, fixtimeutf, latitude, longitude FROM networkfleet_gps " \
+                            "WHERE fixtimeutf > {0} AND fixtimeutf < {1} ORDER BY vin asc, fixtimeutf " \
+                            "asc".format(slice_time_start, scriptStart)
     segment_visits_select_sql = "SELECT objectid, segment_id, time_visited_unix, sv1.vin FROM {0} sv1 JOIN (SELECT " \
                                 "vin, max(time_visited_unix) as maxtime FROM {0} GROUP BY VIN) sv2 ON " \
                                 "sv1.vin = sv2.vin AND sv1.time_visited_unix = " \
                                 "sv2.maxtime".format(config['outputs']['segment_visits_table'])
+    vehicle_assignment_select_sql = "SELECT vin, responsibility, snow_yn FROM networkfleet_vehicles_streets"
     segment_visits_insert_sql = "INSERT INTO {0} (segment_id, time_visited, time_visited_unix, vin, " \
                                "vehicle_assignment) VALUES (%(seg)s, %(ts)s, %(ts_unix)s, %(vin)s, " \
                                "%(asg)s)".format(config['outputs']['segment_visits_table'])
@@ -881,23 +882,28 @@ if __name__ == '__main__':
                                   "AND a.time_visited_unix = b.time_visited_unix WHERE {0}.segment_id = " \
                                   "a.segment_id".format(config['outputs']['most_recent_visit_table'],
                                                         config['outputs']['segment_visits_table'], scriptStart)
-    sanitation_visit_update_sql = "UPDATE {0} SET vin = a.vin, time_visited=a.time_visited, time_visited_unix = " \
-                                  "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, seconds_since_visit" \
-                                  " = {2} - a.time_visited_unix, time_since_visit = trim(leading ' ' from " \
-                                  "to_char(FLOOR(({2} - a.time_visited_unix) / 86400), '0009')) || ':' || TRIM( " \
-                                  "LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} " \
-                                  "- a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from " \
-                                  "TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - " \
-                                  "a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from " \
-                                  "TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * " \
-                                  "60, '09')) FROM {1} a INNER JOIN(SELECT segment_id, MAX(time_visited_unix) as " \
-                                  "time_visited_unix FROM {1} GROUP BY segment_id) b ON a.segment_id = b.segment_id " \
-                                  "AND a.time_visited_unix = b.time_visited_unix WHERE {0}.segment_id = " \
-                                  "a.segment_id AND a.vehicle_assignment = 'Sanitation' AND " \
-                                  "to_timestamp(a.time_visited_unix) >= now()::date".format(
+    rubbish_visit_update_sql = "UPDATE {0} SET rubbish_vin = a.vin, rubbish_time_visited=a.time_visited, " \
+                               "rubbish_time_visited_unix = a.time_visited_unix FROM {1} a INNER JOIN(SELECT " \
+                               "segment_id, MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY segment_id)" \
+                               " b ON a.segment_id = b.segment_id AND a.time_visited_unix = b.time_visited_unix " \
+                               "WHERE {0}.segment_id = a.segment_id AND a.vehicle_assignment = 'RUBBISH' AND " \
+                               "to_timestamp(a.time_visited_unix) >= now()::date".format(
                                         config['outputs']['sanitation_visit_table'],
                                         config['outputs']['segment_visits_table'],
                                         scriptStart)
+    recycling_visit_update_sql = "UPDATE {0} SET recycling_vin = a.vin, recycling_time_visited=a.time_visited, " \
+                                 "recycling_time_visited_unix = a.time_visited_unix FROM {1} a INNER JOIN(SELECT " \
+                                 "segment_id, MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY " \
+                                 "segment_id) b ON a.segment_id = b.segment_id AND a.time_visited_unix = " \
+                                 "b.time_visited_unix WHERE {0}.segment_id = a.segment_id AND a.vehicle_assignment " \
+                                 "= 'RECYCLE' AND to_timestamp(a.time_visited_unix) >= now()::date".format(
+                                        config['outputs']['sanitation_visit_table'],
+                                        config['outputs']['segment_visits_table'],
+                                        scriptStart)
+    sanitation_visit_status_update_sql = "UPDATE {0} AS svs SET visited_status = CASE WHEN rubbish_vin IS NOT NULL " \
+                                         "AND recycling_vin IS NOT NULL THEN 'BOTH' WHEN rubbish_vin IS NOT NULL " \
+                                         "THEN 'RUBBISH' WHEN recycling_vin IS NOT NULL THEN 'RECYCLE' ELSE " \
+                                         "NULL END".format(config['outputs']['sanitation_visit_table'])
 
     points = point_retriever(cursor=production_database_cursor, sql=gps_points_select_sql)
 
@@ -910,6 +916,15 @@ if __name__ == '__main__':
     # Read in the point grid to capture candidate street network segments for each possible gps point
     grid_index = read_point_grid(point_grid)
 
+    # Read in vehicle assignments for streets vehicles
+    production_database_cursor.execute(vehicle_assignment_select_sql)
+    dict_vehicle_assignment = {}
+    for vin in production_database_cursor.fetchall():
+        # print(vin)
+        dict_vehicle_assignment[vin[0]] = [vin[1], vin[2]]
+    # for item in dict_vehicle_assignment.items():
+    #     print(item)
+    # Read in most recent visits for each segment
     production_database_cursor.execute(segment_visits_select_sql)
     dict_most_recent_vin_record = {}
     for vin in production_database_cursor.fetchall():
@@ -917,46 +932,61 @@ if __name__ == '__main__':
     # for k, v in dict_most_recent_vin_record.items():
     #     print(k, v)
 
+    vin_points = None
     for vin_number in points:  # TODO adjust from here
-        try:
-            print('Processing {0}'.format(vin_number))
-            vin_points = points[vin_number][1]
-            mapped_path = street_seg_identifier(gps_points=vin_points, grid=grid_index,
-                                                net_decay_constant=config['inputs']['net_decay_constant'])
-            output_writer(connection=production_database_connection, cursor=production_database_cursor,
-                          sql=segment_visits_insert_sql, vin=vin_number, assignment=points[vin_number][0],
-                          match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
-            del mapped_path
-        except ValueError as e:
-            if str(e) == 'Point density error.':
-                if config['options']['densify']:
-                    try:
-                        print('Attempting to densify points and repeat the identifier function.')
-                        dense_points = densifier(vin_points, threshold_meters=config['options']['densify_threshold'])
-                        mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
-                                                            net_decay_constant=config['inputs']['net_decay_constant'])
-                        output_writer(connection=production_database_connection, cursor=production_database_cursor,
-                                      sql=segment_visits_insert_sql, vin=vin_number, assignment=points[vin_number][0],
-                                      match_route=mapped_path, dict_duplicate_check=dict_most_recent_vin_record)
-                        del dense_points
-                        del mapped_path
-                    except ValueError as e:
-                        if str(e) == 'Point density error.':
-                            print('Vehicle path could not be solved for {0}.'.format(vin_number))
-                            continue
-                        else:
-                            error_handler('New error, please debug - 1.')
+        if vin_number in dict_vehicle_assignment.keys():
+            # print(dict_vehicle_assignment[vin_number][0])
+            try:
+                print('Processing {0}'.format(vin_number))
+                vin_points = points[vin_number]
+                mapped_path = street_seg_identifier(gps_points=vin_points, grid=grid_index,
+                                                    net_decay_constant=config['inputs']['net_decay_constant'])
+                output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                              sql=segment_visits_insert_sql, vin=vin_number,
+                              assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
+                              dict_duplicate_check=dict_most_recent_vin_record)
+                del mapped_path
+            except ValueError as e:
+                if str(e) == 'Point density error.':
+                    if config['options']['densify']:
+                        try:
+                            print('Attempting to densify points and repeat the identifier function.')
+                            dense_points = densifier(vin_points,
+                                                     threshold_meters=config['options']['densify_threshold'])
+                            mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
+                                                                net_decay_constant=
+                                                                config['inputs']['net_decay_constant'])
+                            output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                                          sql=segment_visits_insert_sql, vin=vin_number,
+                                          assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
+                                          dict_duplicate_check=dict_most_recent_vin_record)
+                            del dense_points
+                            del mapped_path
+                        except ValueError as e:
+                            if str(e) == 'Point density error.':
+                                print('Vehicle path could not be solved for {0}.'.format(vin_number))
+                                continue
+                            else:
+                                error_handler('New error, please debug - 1.')
+                    else:
+                        print('Vehicle path could not be solved, increase decay or select densify option in config.')
+                elif str(e) == 'No path':
+                    print('No path for vin {0}'.format(vin_number))
+                    continue
                 else:
-                    print('Vehicle path could not be solved, increase decay or select densify option in config.')
-            elif str(e) == 'No path':
-                print('No path for vin {0}'.format(vin_number))
-                continue
-            else:
-                error_handler('New error, please debug - 2.')
-        except:
-            error_handler('New error, please debug - 3.')
+                    error_handler('New error, please debug - 2.')
+            except:
+                error_handler('New error, please debug - 3.')
+        else:
+            continue
     # print(most_recent_visit_update_sql)
     production_database_cursor.execute(most_recent_visit_update_sql)
+    production_database_connection.commit()
+    production_database_cursor.execute(rubbish_visit_update_sql)
+    production_database_connection.commit()
+    production_database_cursor.execute(recycling_visit_update_sql)
+    production_database_connection.commit()
+    production_database_cursor.execute(sanitation_visit_status_update_sql)
     production_database_connection.commit()
     production_database_cursor.close()
     production_database_connection.close()
