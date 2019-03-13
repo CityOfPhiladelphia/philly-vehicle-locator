@@ -869,18 +869,32 @@ if __name__ == '__main__':
                                "vehicle_assignment) VALUES (%(seg)s, %(ts)s, %(ts_unix)s, %(vin)s, " \
                                "%(asg)s)".format(config['outputs']['segment_visits_table'])
     most_recent_visit_update_sql = "UPDATE {0} SET vin = a.vin, time_visited=a.time_visited, time_visited_unix = " \
-                                  "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, seconds_since_visit " \
-                                  "= {2} - a.time_visited_unix, time_since_visit = trim(leading ' ' from " \
-                                  "to_char(FLOOR(({2} - a.time_visited_unix) / 86400), '0009')) || ':' || TRIM( " \
-                                  "LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} " \
-                                  "- a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from " \
-                                  "TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - " \
-                                  "a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from " \
-                                  "TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * " \
-                                  "60, '09')) FROM {1} a INNER JOIN(SELECT segment_id, MAX(time_visited_unix) as " \
-                                  "time_visited_unix FROM {1} GROUP BY segment_id) b ON a.segment_id = b.segment_id " \
-                                  "AND a.time_visited_unix = b.time_visited_unix WHERE {0}.segment_id = " \
-                                  "a.segment_id".format(config['outputs']['most_recent_visit_table'],
+                                   "a.time_visited_unix, vehicle_assignment=a.vehicle_assignment, seconds_since_visit" \
+                                   " = {2} - a.time_visited_unix, time_since_visit = CASE WHEN trim(leading ' ' from" \
+                                   " to_char(FLOOR(({2} - a.time_visited_unix) / 86400), '0009')) = '0000' THEN TRIM(" \
+                                   " LEADING ' ' from TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 3600) - FLOOR(({2}" \
+                                   " - a.time_visited_unix) / 86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from" \
+                                   " TO_CHAR(FLOOR((({2} - a.time_visited_unix) / 60) - FLOOR(({2} - " \
+                                   "a.time_visited_unix) / 3600) * 60), '09'))  || ':' || TRIM( LEADING ' ' from " \
+                                   "TO_CHAR(({2} - a.time_visited_unix) - FLOOR(({2} - a.time_visited_unix) / 60) * " \
+                                   "60, '09')) WHEN trim(leading ' ' from to_char(FLOOR(({2} - a.time_visited_unix) /" \
+                                   " 86400), '0009')) = '0001' THEN '1 day, ' || TRIM( LEADING ' ' from TO_CHAR(FLOOR" \
+                                   "((({2} - a.time_visited_unix) / 3600) - FLOOR(({2} - a.time_visited_unix) / " \
+                                   "86400) * 24), '09')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - " \
+                                   "a.time_visited_unix) / 60) - FLOOR(({2} - a.time_visited_unix) / 3600) * 60), " \
+                                   "'09'))  || ':' || TRIM( LEADING ' ' from TO_CHAR(({2} - a.time_visited_unix) - " \
+                                   "FLOOR(({2} - a.time_visited_unix) / 60) * 60, '09')) ELSE trim(leading '0' from " \
+                                   "trim(leading ' ' from to_char(FLOOR(({2} - a.time_visited_unix) / 86400), '0009'" \
+                                   "))) || ' days, ' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - " \
+                                   "a.time_visited_unix) / 3600) - FLOOR(({2} - a.time_visited_unix) / 86400) * 24)," \
+                                   " '09')) || ':' || TRIM( LEADING ' ' from TO_CHAR(FLOOR((({2} - " \
+                                   "a.time_visited_unix) / 60) - FLOOR(({2} - a.time_visited_unix) / 3600) * 60), " \
+                                   "'09'))  || ':' || TRIM( LEADING ' ' from TO_CHAR(({2} - a.time_visited_unix) - " \
+                                   "FLOOR(({2} - a.time_visited_unix) / 60) * 60, '09')) END FROM {1} a INNER JOIN(" \
+                                   "SELECT segment_id, MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY " \
+                                   "segment_id) b ON a.segment_id = b.segment_id AND a.time_visited_unix = " \
+                                   "b.time_visited_unix WHERE {0}.segment_id = a.segment_id".format(
+                                                        config['outputs']['most_recent_visit_table'],
                                                         config['outputs']['segment_visits_table'], scriptStart)
     rubbish_visit_update_sql = "UPDATE {0} SET rubbish_vin = a.vin, rubbish_time_visited=a.time_visited, " \
                                "rubbish_time_visited_unix = a.time_visited_unix FROM {1} a INNER JOIN(SELECT " \
