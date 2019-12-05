@@ -86,8 +86,7 @@ def index_network_segment_info(input_network):
     """
     try:
         if os.path.isfile(str(os.path.join(arcpy.env.workspace, input_network))):
-            segment_cursor = arcpy.da.SearchCursor(in_table=input_network, field_names=['OBJECTID', 'SHAPE@'])
-            # TODO OBJECTID needs to be replaced with seg_id in above cursor for production
+            segment_cursor = arcpy.da.SearchCursor(in_table=input_network, field_names=['SEG_ID', 'SHAPE@'])
             segment_end_points = {}
             segment_lengths = {}
             for segment in segment_cursor:
@@ -124,8 +123,7 @@ def create_network_graph(input_network, segment_lengths):
             print('Graph size (excluding unconnected parts): {0}'.format(len(graph)))
             # Append the length of each road segment as an attribute to the edges in the network subgraph.
             for node_0, node_1 in subgraph.edges():
-                segment_id = subgraph[node_0][node_1]['OBJECTID']
-                # TODO OBJECTID needs to be replaced with seg_id in above line for production
+                segment_id = subgraph[node_0][node_1]['SEG_ID']
                 subgraph[node_0][node_1]['length'] = segment_lengths[segment_id]
             return subgraph
         else:
@@ -528,7 +526,7 @@ def calculate_network_transition_probability(segment_1, segment_2, input_graph, 
                     path_edges = zip(path, path[1:])
                     sub_path = []
                     for path_edge in path_edges:
-                        segment_id = input_graph[path_edge[0]][path_edge[1]]['OBJECTID']  # TODO change to segment id
+                        segment_id = input_graph[path_edge[0]][path_edge[1]]['SEG_ID']
                         sub_path.append(segment_id)
                 else:
                     # Node not found in segment's input graph, set distance to a larger number

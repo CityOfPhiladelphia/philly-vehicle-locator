@@ -12,7 +12,7 @@ By aggregating vehicle GPS points directly to street centerline segments, PVL is
 raw GPS feeds.  This reduces record storage by 75% and makes querying & filtering for mapping and reporting much 
 quicker.
 <h5>Data Availability</h5>
-<<i>Enter text here</i>>  
+Raw GPS points and PVL processed vehicle route data are made internally available to City employees via shared database servers.  
 <h2>Requirements, Configuration & Environment</h2>
 <h4>Requirements</h4>
 Philly Vehicle Locator (base configuration) requires the following:
@@ -35,12 +35,7 @@ Philly Vehicle Locator (base configuration) requires the following:
 matching of vehicle GPS points to street centerline segments.  The City of Philadelphia is currently utilizing vehicle 
 GPS points received at a 15 second ping rate.
 <h4>Configuration</h4>
-Follow the steps below:
-<ol>
-<li><<i>Enter text here</i>></li>
-<li><<i>Enter text here</i>></li>
-<li><<i>Enter text here</i>></li>
-</ol>
+[<i>Coming Soon</i>]
 <h4>Environment</h4>
 The Office of Innovation & Technology is currently using the following technologies & software for PVL:
 <ul>
@@ -61,4 +56,5 @@ The original basis of the Philly Vehicle Locator scripts were derived from <b>
 <a href="https://github.com/simonscheider">simonscheider's</a></b> repository, <b>
 <a href="https://github.com/simonscheider/mapmatching">mapmatching</a></b>.
 <h5>Licensing</h5>
+[<i>Coming Soon</i>]
   
