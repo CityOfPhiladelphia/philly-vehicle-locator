@@ -1,10 +1,10 @@
 <h1>Philly Vehicle Locator</h1>
 <h2>Background</h2>
 <h4>What is the Philly Vehicle Locator (PVL)?</h4>
-Philly Vehicle Locator (PVL) is the City of Philadelphia's automated vehicle location (AVL) solution. The PVL system 
+Philly Vehicle Locator (PVL) is the City of Philadelphia's custom vehicle tracking solution. The PVL system 
 has been designed to make GPS data received from departmental vehicles operational 
 and is managed by the Office of Innovation & Technology's CityGeo team.
-<h4>How is PVL different from standard AVL?</h4>
+<h4>How is PVL different from AVL?</h4>
 PVL has been designed to make GPS data easier to analyze, more readily available, and more efficient to store and 
 process.
 <h5>Efficiency & Ease of Analysis</h5>
@@ -31,11 +31,9 @@ Philly Vehicle Locator (base configuration) requires the following:
 </ul>
 </li>
 </ul>
-<b>NOTE -</b> Density of GPS points consumed by the philly-vehicle-locator.py script will heavily influence successful 
+<b>NOTE -</b> Frequency of GPS points consumed by the philly-vehicle-locator.py script will heavily influence successful 
 matching of vehicle GPS points to street centerline segments.  The City of Philadelphia is currently utilizing vehicle 
 GPS points received at a 15 second ping rate.
-<h4>Configuration</h4>
-[<i>Coming Soon</i>]
 <h4>Environment</h4>
 The Office of Innovation & Technology is currently using the following technologies & software for PVL:
 <ul>
