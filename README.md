@@ -53,6 +53,4 @@ The Office of Innovation & Technology is currently using the following technolog
 The original basis of the Philly Vehicle Locator scripts were derived from <b>
 <a href="https://github.com/simonscheider">simonscheider's</a></b> repository, <b>
 <a href="https://github.com/simonscheider/mapmatching">mapmatching</a></b>.
-<h5>Licensing</h5>
-[<i>Coming Soon</i>]
   
