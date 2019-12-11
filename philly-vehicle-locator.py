@@ -1,10 +1,10 @@
 """
 Script: Philly Vehicle Locator (PVL)
 File Name: philly-vehicle-locator.py
-Version: 1.0.2
+Version: 1.2.0
 Date Created: 10/24/2018
 Author: Tim Haynes & Paul Sesink Clee
-Last Update: 2/14/2019
+Last Update: 12/11/2019
 Updater: Tim Haynes
 
 Summary: Script for consuming NetworkFleet GPS points and adapting them for street segment outputs.
