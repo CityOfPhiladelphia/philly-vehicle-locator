@@ -1,10 +1,10 @@
 """
 Script: Philly Vehicle Locator (PVL)
 File Name: philly-vehicle-locator.py
-Version: 1.0.2
+Version: 1.1.0
 Date Created: 10/24/2018
 Author: Tim Haynes & Paul Sesink Clee
-Last Update: 2/14/2019
+Last Update: 1/29/2020
 Updater: Tim Haynes
 
 Summary: Script for consuming NetworkFleet GPS points and adapting them for street segment outputs.
@@ -56,7 +56,7 @@ def point_retriever(cursor, sql):
     log.info('Number of points: {0}'.format(len(point_list)))
     if len(point_list) < 1:
         cursor.execute("SELECT MAX(fixtimeutf) FROM networkfleet_gps")
-        last_point_time = production_database_cursor.fetchone()
+        last_point_time = cursor.fetchone()
         time_since_last_point = (scriptStart - int(last_point_time[0])) / 60.0
         error_handler('No points returned by query. Last point was {0} minutes ago.'.format(time_since_last_point))
         sys.exit(1)
@@ -811,6 +811,25 @@ def output_writer(connection, cursor, sql, vin, assignment, match_route, dict_du
             connection.commit()
 
 
+def reset_script_database(input_connection, input_cursor):
+    """
+    Removes points older than 3600 seconds (1 hour) from the script database, keeping queries manageable and quick
+    for the next run of this script.
+
+    Parameters:
+        input_connection: Refers to the already open psycopg2 connection to the script database
+        input_cursor: Refers to the open psycopg2 cursor on the script database
+
+    Output: No output, records are removed from a pre-existing table.
+    """
+    input_connection.set_session(autocommit=True)
+    input_cursor.execute("CALL delete_old_points()")
+    input_cursor.execute("VACUUM networkfleet_streets_pvl")
+    input_cursor.close()
+    input_connection.set_session(autocommit=False)
+    input_connection.close()
+
+
 if __name__ == '__main__':
     # Locate and read config file
     scriptDirectory = os.path.dirname(__file__)
@@ -850,11 +869,27 @@ if __name__ == '__main__':
     arcpy.env.workspace = config['environment']['env_workspace']
     street_network = config['inputs']['street_network']
     point_grid = os.path.join(arcpy.env.workspace, config['inputs']['point_grid'])
-    production_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
-        config['outputs']['database_name'], config['outputs']['database_user'], config['outputs']['database_host'],
-        config['outputs']['database_password'])
-    production_database_connection = psycopg2.connect(production_database_dns)
-    production_database_cursor = production_database_connection.cursor()
+    # Set up connection to raw database
+    raw_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
+        config['outputs']['raw_database_name'], config['outputs']['raw_database_user'],
+        config['outputs']['raw_database_host'],
+        config['outputs']['raw_database_password'])
+    raw_database_connection = psycopg2.connect(raw_database_dns)
+    raw_database_cursor = raw_database_connection.cursor()
+    # Set up conection to script database
+    script_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
+        config['outputs']['script_database_name'], config['outputs']['script_database_user'],
+        config['outputs']['script_database_host'], config['outputs']['script_database_password'])
+    script_database_connection = psycopg2.connect(script_database_dns)
+    script_database_cursor = script_database_connection.cursor()
+    # Set up connection to publication database
+    pub_database_dns = "dbname='{0}' user='{1}' host='{2}' password='{3}'".format(
+        config['outputs']['pub_database_name'], config['outputs']['pub_database_user'],
+        config['outputs']['pub_database_host'],
+        config['outputs']['pub_database_password'])
+    pub_database_connection = psycopg2.connect(pub_database_dns)
+    pub_database_cursor = pub_database_connection.cursor()
+    # Prepare SQL statements
     gps_points_select_sql = "SELECT vin, fixtimeutf, latitude, longitude FROM networkfleet_gps " \
                             "WHERE fixtimeutf > {0} AND fixtimeutf < {1} ORDER BY vin asc, fixtimeutf " \
                             "asc".format(slice_time_start, scriptStart)
@@ -894,6 +929,10 @@ if __name__ == '__main__':
                                    "b.time_visited_unix WHERE {0}.segment_id = a.segment_id".format(
                                                         config['outputs']['most_recent_visit_table'],
                                                         config['outputs']['segment_visits_table'], scriptStart)
+    '''
+    Removed the following update from the script. This table is not currently utilized, but is being maintained for 
+    potential future use.
+    
     rubbish_visit_update_sql = "UPDATE {0} SET rubbish_vin = a.vin, rubbish_time_visited=a.time_visited, " \
                                "rubbish_time_visited_unix = a.time_visited_unix FROM {1} a INNER JOIN(SELECT " \
                                "segment_id, MAX(time_visited_unix) as time_visited_unix FROM {1} GROUP BY segment_id)" \
@@ -916,8 +955,9 @@ if __name__ == '__main__':
                                          "AND recycling_vin IS NOT NULL THEN 'BOTH' WHEN rubbish_vin IS NOT NULL " \
                                          "THEN 'RUBBISH' WHEN recycling_vin IS NOT NULL THEN 'RECYCLE' ELSE " \
                                          "NULL END".format(config['outputs']['sanitation_visit_table'])
+    '''
 
-    points = point_retriever(cursor=production_database_cursor, sql=gps_points_select_sql)
+    points = point_retriever(cursor=script_database_cursor, sql=gps_points_select_sql)
 
     # Read / index street network and create network graph
     segment_info = index_network_segment_info(input_network=street_network)
@@ -929,17 +969,17 @@ if __name__ == '__main__':
     grid_index = read_point_grid(point_grid)
 
     # Read in vehicle assignments for streets vehicles
-    production_database_cursor.execute(vehicle_assignment_select_sql)
+    script_database_cursor.execute(vehicle_assignment_select_sql)
     dict_vehicle_assignment = {}
-    for vin in production_database_cursor.fetchall():
+    for vin in script_database_cursor.fetchall():
         # print(vin)
         dict_vehicle_assignment[vin[0]] = [vin[1], vin[2]]
     # for item in dict_vehicle_assignment.items():
     #     print(item)
     # Read in most recent visits for each segment
-    production_database_cursor.execute(segment_visits_select_sql)
+    pub_database_cursor.execute(segment_visits_select_sql)
     dict_most_recent_vin_record = {}
-    for vin in production_database_cursor.fetchall():
+    for vin in pub_database_cursor.fetchall():
         dict_most_recent_vin_record[vin[3]] = [vin[1], vin[2], vin[0]]
     # for k, v in dict_most_recent_vin_record.items():
     #     print(k, v)
@@ -953,7 +993,12 @@ if __name__ == '__main__':
                 vin_points = points[vin_number]
                 mapped_path = street_seg_identifier(gps_points=vin_points, grid=grid_index,
                                                     net_decay_constant=config['inputs']['net_decay_constant'])
-                output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                # TODO remove raw output writer once new publication database is ready
+                output_writer(connection=raw_database_connection, cursor=raw_database_cursor,
+                              sql=segment_visits_insert_sql, vin=vin_number,
+                              assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
+                              dict_duplicate_check=dict_most_recent_vin_record)
+                output_writer(connection=pub_database_connection, cursor=pub_database_cursor,
                               sql=segment_visits_insert_sql, vin=vin_number,
                               assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
                               dict_duplicate_check=dict_most_recent_vin_record)
@@ -968,7 +1013,12 @@ if __name__ == '__main__':
                             mapped_path = street_seg_identifier(gps_points=dense_points, grid=grid_index,
                                                                 net_decay_constant=
                                                                 config['inputs']['net_decay_constant'])
-                            output_writer(connection=production_database_connection, cursor=production_database_cursor,
+                            # TODO remove raw output writer once new publication database is ready
+                            output_writer(connection=raw_database_connection, cursor=raw_database_cursor,
+                                          sql=segment_visits_insert_sql, vin=vin_number,
+                                          assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
+                                          dict_duplicate_check=dict_most_recent_vin_record)
+                            output_writer(connection=pub_database_connection, cursor=pub_database_cursor,
                                           sql=segment_visits_insert_sql, vin=vin_number,
                                           assignment=dict_vehicle_assignment[vin_number][0], match_route=mapped_path,
                                           dict_duplicate_check=dict_most_recent_vin_record)
@@ -992,16 +1042,28 @@ if __name__ == '__main__':
         else:
             continue
     # print(most_recent_visit_update_sql)
-    production_database_cursor.execute(most_recent_visit_update_sql)
-    production_database_connection.commit()
-    production_database_cursor.execute(rubbish_visit_update_sql)
-    production_database_connection.commit()
-    production_database_cursor.execute(recycling_visit_update_sql)
-    production_database_connection.commit()
-    production_database_cursor.execute(sanitation_visit_status_update_sql)
-    production_database_connection.commit()
-    production_database_cursor.close()
-    production_database_connection.close()
+    # TODO Remove raw database updates lines after we migrate entirely to pub database for output
+    raw_database_cursor.execute(most_recent_visit_update_sql)
+    raw_database_connection.commit()
+    # raw_database_cursor.execute(rubbish_visit_update_sql)
+    # raw_database_connection.commit()
+    # raw_database_cursor.execute(recycling_visit_update_sql)
+    # raw_database_connection.commit()
+    # raw_database_cursor.execute(sanitation_visit_status_update_sql)
+    # raw_database_connection.commit()
+    raw_database_cursor.close()
+    raw_database_connection.close()
+    pub_database_cursor.execute(most_recent_visit_update_sql)
+    pub_database_connection.commit()
+    # pub_database_cursor.execute(rubbish_visit_update_sql)
+    # pub_database_connection.commit()
+    # pub_database_cursor.execute(recycling_visit_update_sql)
+    # pub_database_connection.commit()
+    # pub_database_cursor.execute(sanitation_visit_status_update_sql)
+    # pub_database_connection.commit()
+    pub_database_cursor.close()
+    pub_database_connection.close()
+    reset_script_database(input_connection=script_database_connection, input_cursor=script_database_cursor)
     log.info('Script ended: {0}'.format(dt.now().strftime('%c %Z')))
     print('Script ended: {0}'.format(dt.now().strftime('%c %Z')))
 
